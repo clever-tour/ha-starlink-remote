@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "cookie": "Browser Cookie",
+          "router_id": "Router ID",
+          "scan_interval": "Scan Interval (seconds)"
+        }
+      },
+      "select_device": {
+        "data": {
+          "device_id": "Select Device"
+        }
+      }
+    }
+  }
+}
