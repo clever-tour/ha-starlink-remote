@@ -1,33 +1,29 @@
-import asyncio
-import json
-import websockets
-import sys
+import httpx, re, json, os, sys
 
-async def diagnose(url, token):
-    uri = f"{url.replace('http', 'ws')}/api/websocket"
-    async with websockets.connect(uri) as ws:
-        # Auth
-        await ws.recv() # auth_required
-        await ws.send(json.dumps({"type": "auth", "access_token": token}))
-        await ws.recv() # auth_ok
-        
-        # Try to get supported features or just test a few commands
-        commands = [
-            "config/config_entries/get_entries",
-            "config/area_registry/list",
-        ]
-        
-        for i, cmd in enumerate(commands, 1):
-            msg = {"id": i, "type": cmd}
-            if "flow" in cmd:
-                msg["handler"] = "starlink_ha"
-            await ws.send(json.dumps(msg))
-            resp = json.loads(await ws.recv())
-            print(f"Command '{cmd}': {resp.get('error', {}).get('code', 'SUCCESS')}")
-            if resp.get('success'):
-                print(f"  Result: {resp.get('result')}")
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
-if __name__ == "__main__":
-    url = "http://192.168.3.26:8123"
-    token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIzNTA4MGMyZjNmMDQ0NmEzYWYxN2NhMmQ5ODEyNTY3YiIsImlhdCI6MTc3NTA0MjM4MSwiZXhwIjoyMDkwNDAyMzgxfQ.OufTnfuX_Fn22d7V3ffaVoc35DKl7zTvbi1pIw2vbzI"
-    asyncio.run(diagnose(url, token))
+def run():
+    with open("cookie.txt", "r") as f: raw_cookie = f.read().strip()
+    sys.path.insert(0, os.path.join(os.getcwd(), "custom_components/starlink_remote"))
+    from spacex.api.device.device_pb2 import Request, Response, GetStatusRequest
+    
+    client = httpx.Client(http2=True)
+    xsrf = re.search(r'XSRF-TOKEN=([^;]+)', raw_cookie).group(1)
+    headers = {"User-Agent": UA, "cookie": raw_cookie, "x-xsrf-token": xsrf, "content-type": "application/grpc-web+proto", "x-grpc-web": "1"}
+    
+    url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
+    tid = "ut10588f9d-45017219-5815f472"
+    
+    req = Request(target_id=tid, get_status=GetStatusRequest())
+    ser = req.SerializeToString()
+    frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
+    res = client.post(url, headers=headers, content=frame)
+    print(f"Status: {res.status_code} | Len: {len(res.content)}")
+    
+    if len(res.content) > 5:
+        out = Response()
+        out.ParseFromString(res.content[5:5+int.from_bytes(res.content[1:5], 'big')])
+        print(f"WhichOneOf: {out.WhichOneof('response')}")
+        # print(out)
+
+if __name__ == "__main__": run()

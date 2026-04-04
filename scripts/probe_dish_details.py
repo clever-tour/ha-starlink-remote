@@ -1,67 +1,66 @@
-import httpx
-import json
-import sys
-from pathlib import Path
-from google.protobuf.json_format import MessageToDict
+import httpx, re, json, os, sys, time
 
-# Add components path for imports
-pkg_path = str(Path(__file__).parent.parent / "custom_components" / "starlink_ha")
-if pkg_path not in sys.path:
-    sys.path.insert(0, pkg_path)
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
-from spacex.api.device.device_pb2 import Request, GetStatusRequest, Response
-
-def _make_grpc_web_call(req_obj: Request, cookie: str, url: str) -> Response:
-    serialized = req_obj.SerializeToString()
-    frame = b'\x00' + len(serialized).to_bytes(4, 'big') + serialized
-    headers = {
-        "accept": "*/*",
-        "content-type": "application/grpc-web+proto",
-        "x-grpc-web": "1",
-        "cookie": cookie,
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-        "origin": "https://starlink.com",
-        "referer": "https://starlink.com/account/home"
-    }
-    with httpx.Client(http2=True) as client:
-        resp = client.post(url, headers=headers, content=frame, timeout=15.0)
-        if resp.status_code != 200: return None
-        if len(resp.content) < 5: return Response()
-        data_len = int.from_bytes(resp.content[1:5], 'big')
-        data_payload = resp.content[5:5+data_len]
-        out = Response()
-        out.ParseFromString(data_payload)
-        return out
-
-def main():
+def run_test():
     with open("cookie.txt", "r") as f:
-        cookie = f.read().strip()
+        raw_cookie = f.read().strip()
+
+    sys.path.insert(0, os.path.join(os.getcwd(), "custom_components/starlink_remote"))
+    from spacex.api.device.device_pb2 import Request, Response, DishGetStatusRequest, DishGetHistoryRequest
+    from google.protobuf.json_format import MessageToDict
+
+    client = httpx.Client(http2=True, follow_redirects=True)
     
-    # Dish ID (User Terminal)
-    dish_id = "ut10588f9d-45017219-5815f472"
-    url = "https://api2.starlink.com/SpaceX.API.Device.Device/Handle"
+    xsrf = ""
+    match = re.search(r'XSRF-TOKEN=([^;]+)', raw_cookie)
+    if match: xsrf = match.group(1)
+
+    headers = {
+        "User-Agent": UA, "cookie": raw_cookie, "x-xsrf-token": xsrf,
+        "content-type": "application/grpc-web+proto", "x-grpc-web": "1"
+    }
+
+    url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
+    tid = "ut10588f9d-45017219-5815f472"
+
+    # Priming
+    client.get("https://www.starlink.com/account/home", headers={"User-Agent": UA, "cookie": raw_cookie})
+    time.sleep(0.1)
+
+    print(f"[*] Polling Dish: {tid}")
     
-    print(f"[*] Probing Dish ID: {dish_id}")
-    req = Request(target_id=dish_id, get_status=GetStatusRequest())
-    resp = _make_grpc_web_call(req, cookie, url)
-    
-    if resp and resp.HasField("dish_get_status"):
-        print("[+] Success! Captured Dish Status.")
-        data = MessageToDict(resp.dish_get_status)
-        
-        # Look for the specific fields
-        metrics = {
-            "alerts": data.get("alerts"),
-            "obstruction_stats": data.get("obstructionStats"),
-            "alignment_stats": data.get("alignmentStats"),
-            "dish_state": data.get("state")
-        }
-        print(json.dumps(metrics, indent=2))
-        
-        with open("scripts/dish_probe.json", "w") as f:
-            json.dump(data, f, indent=2)
-    else:
-        print("[-] Failed to get dish_get_status response.")
+    # 1. Get Status
+    print("  >>> DishGetStatusRequest...")
+    req = Request(target_id=tid, dish_get_status=DishGetStatusRequest())
+    ser = req.SerializeToString()
+    frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
+    res = client.post(url, headers=headers, content=frame)
+    if res.status_code == 200 and len(res.content) > 5:
+        msg_len = int.from_bytes(res.content[1:5], 'big')
+        out = Response()
+        out.ParseFromString(res.content[5:5+msg_len])
+        rt = out.WhichOneof('response')
+        if rt:
+            data = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
+            with open("dish_status.json", "w") as f: json.dump(data, f, indent=2)
+            print("  [SUCCESS] Status saved to dish_status.json")
+
+    # 2. Get History
+    print("\n  >>> DishGetHistoryRequest...")
+    req = Request(target_id=tid, dish_get_history=DishGetHistoryRequest())
+    ser = req.SerializeToString()
+    frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
+    res = client.post(url, headers=headers, content=frame)
+    if res.status_code == 200 and len(res.content) > 5:
+        msg_len = int.from_bytes(res.content[1:5], 'big')
+        out = Response()
+        out.ParseFromString(res.content[5:5+msg_len])
+        rt = out.WhichOneof('response')
+        if rt:
+            data = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
+            with open("dish_history.json", "w") as f: json.dump(data, f, indent=2)
+            print("  [SUCCESS] History saved to dish_history.json")
 
 if __name__ == "__main__":
-    main()
+    run_test()
