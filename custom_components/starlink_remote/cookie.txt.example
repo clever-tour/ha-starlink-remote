@@ -1,0 +1,3 @@
+# Replace this with your actual Starlink cookie string.
+# See README.md for instructions on how to fetch this from your browser.
+_ga=GA1.1.example; Starlink.Com.Sso=example_session_token; Starlink.Com.Access.V1=example_access_token

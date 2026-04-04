@@ -5,7 +5,7 @@ from google.protobuf.json_format import MessageToDict
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "custom_components" / "starlink_remote"))
 
-from spacex.api.device.device_pb2 import Request, Response, GetLogRequest
+from spacex.api.device.device_pb2 import Request, Response, GetStatusRequest
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
@@ -26,8 +26,8 @@ def run():
     ids = ["ut10588f9d-45017219-5815f472", "Router-0100000000000000008B65AD"]
 
     for tid in ids:
-        print(f"\n[*] Fetching Logs for: {tid}")
-        req = Request(target_id=tid, get_log=GetLogRequest())
+        print(f"\n[*] Fetching Status/Alerts for: {tid}")
+        req = Request(target_id=tid, get_status=GetStatusRequest())
         ser = req.SerializeToString()
         frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
         
@@ -38,15 +38,22 @@ def run():
                 out = Response()
                 out.ParseFromString(res.content[5:5+msg_len])
                 rt = out.WhichOneof('response')
-                if rt == 'get_log':
-                    d = MessageToDict(out.get_log, preserving_proto_field_name=True)
-                    print(f"  [SUCCESS] Received logs. Keys: {list(d.keys())}")
-                    # Save a sample to check for the user's specific events
-                    fname = f"log_{tid[:10]}.json"
-                    with open(fname, "w") as f: json.dump(d, f, indent=2)
-                    print(f"  Log sample saved to {fname}")
-                else:
-                    print(f"  Received unexpected response type: {rt}")
+                d = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
+                
+                print(f"  [SUCCESS] Received {rt}. Checking for alerts...")
+                
+                # Check for common alert keys
+                if rt == 'dish_get_status':
+                    alerts = d.get('alerts', {})
+                    print(f"  Dish Alerts: {json.dumps(alerts, indent=2)}")
+                elif rt == 'wifi_get_status':
+                    # Router alerts are often in a different structure
+                    print(f"  Router Status Keys: {list(d.keys())}")
+                    # Look for anything named alert or issue
+                    for k in d.keys():
+                        if 'alert' in k.lower() or 'issue' in k.lower() or 'event' in k.lower():
+                            print(f"  Found potential alert key: {k}")
+                            print(f"  {k}: {json.dumps(d[k], indent=2)}")
             else:
                 print(f"  Failed. HTTP {res.status_code} | Len: {len(res.content)}")
         except Exception as e:

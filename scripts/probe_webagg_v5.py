@@ -12,28 +12,20 @@ def run():
     fresh_cookie = "; ".join([f"{c.name}={c.value}" for c in client.cookies.jar])
     headers = {"User-Agent": UA, "cookie": fresh_cookie or raw_cookie, "x-xsrf-token": xsrf}
 
-    # SL ID
     sl = "SL-1991965-88036-90"
 
     urls = [
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/telemetry/history",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/outages",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/alerts",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/notifications",
+        f"https://api.starlink.com/webagg/v2/service-lines/{sl}/status",
+        f"https://api.starlink.com/webagg/v2/service-lines/{sl}/details",
+        f"https://api.starlink.com/webagg/v2/service-lines/{sl}/events",
+        f"https://api.starlink.com/webagg/v2/service-lines/{sl}/usage-summary",
     ]
 
     for url in urls:
         print(f"[*] Probing: {url}")
-        try:
-            r = client.get(url, headers=headers)
-            print(f"  Status: {r.status_code}")
-            if r.status_code == 200:
-                print(f"  [SUCCESS] Received data.")
-                print(json.dumps(r.json(), indent=2)[:500])
-            else:
-                print(f"  Error: {r.text[:200]}")
-        except Exception as e:
-            print(f"  Error: {e}")
+        r = client.get(url, headers=headers)
+        print(f"  Status: {r.status_code}")
+        if r.status_code == 200:
+            print(f"  [SUCCESS] Data: {json.dumps(r.json(), indent=2)[:500]}")
 
-if __name__ == "__main__":
-    run()
+if __name__ == "__main__": run()

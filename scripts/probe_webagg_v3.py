@@ -15,16 +15,14 @@ def run():
         "origin": "https://www.starlink.com", "referer": "https://www.starlink.com/account/home"
     }
 
-    # Common Account/ServiceLine IDs
-    account = "ACC-5147187-41313-10"
+    # SL ID
     sl = "SL-1991965-88036-90"
 
     urls = [
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/history",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/notifications",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/telemetry",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/telemetry",
-        "https://api.starlink.com/webagg/v2/accounts/history",
+        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/telemetry/history",
+        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/outages",
+        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/alerts",
+        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/notifications",
     ]
 
     for url in urls:
@@ -33,9 +31,8 @@ def run():
             r = client.get(url, headers=headers)
             print(f"  Status: {r.status_code}")
             if r.status_code == 200:
-                data = r.json()
                 print(f"  [SUCCESS] Received data.")
-                print(json.dumps(data, indent=2)[:500])
+                print(json.dumps(r.json(), indent=2)[:500])
             else:
                 print(f"  Error: {r.text[:200]}")
         except Exception as e:

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "minor_version": 5,
+  "key": "core.config_entries",
+  "data": {
+    "entries": [
+      {
+        "created_at": "2026-04-01T00:00:00.000000+00:00",
+        "data": {
+          "cookie": "_ga=GA1.1.example; Starlink.Com.Sso=example; Starlink.Com.Access.V1=example",
+          "name": "Example Starlink",
+          "scan_interval": 60
+        },
+        "disabled_by": null,
+        "discovery_keys": {},
+        "domain": "starlink_remote",
+        "entry_id": "EXAMPLE_ENTRY_ID",
+        "minor_version": 1,
+        "modified_at": "2026-04-01T00:00:00.000000+00:00",
+        "options": {},
+        "pref_disable_new_entities": false,
+        "pref_disable_polling": false,
+        "source": "user",
+        "subentries": [],
+        "title": "Example Starlink",
+        "unique_id": "starlink_example_id",
+        "version": 1
+      }
+    ]
+  }
+}

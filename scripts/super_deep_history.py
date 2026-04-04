@@ -1,67 +1,56 @@
-import httpx
-import json
-import sys
-import time
+import httpx, re, json, sys, os, binascii
 from pathlib import Path
 from google.protobuf.json_format import MessageToDict
 
-# Add components path for imports
-pkg_path = str(Path(__file__).parent.parent / "custom_components" / "starlink_ha")
-if pkg_path not in sys.path:
-    sys.path.insert(0, pkg_path)
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "custom_components" / "starlink_remote"))
 
-from spacex.api.device.device_pb2 import Request, GetHistoryRequest, Response
+from spacex.api.device.device_pb2 import Request, Response, GetHistoryRequest
 
-def _make_grpc_web_call(req_obj: Request, cookie: str, url: str) -> Response:
-    serialized = req_obj.SerializeToString()
-    frame = b'\x00' + len(serialized).to_bytes(4, 'big') + serialized
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
+
+def run():
+    with open("cookie.txt", "r") as f: raw_cookie = f.read().strip()
+    client = httpx.Client(http2=True, follow_redirects=True)
+    
+    print("[*] Priming Session...")
+    client.get("https://www.starlink.com/account/home", headers={"User-Agent": UA, "cookie": raw_cookie})
+    xsrf = client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default='')
+
     headers = {
-        "accept": "*/*",
-        "content-type": "application/grpc-web+proto",
-        "x-grpc-web": "1",
-        "cookie": cookie,
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "User-Agent": UA, "cookie": raw_cookie, "x-xsrf-token": xsrf,
+        "content-type": "application/grpc-web+proto", "x-grpc-web": "1"
     }
-    with httpx.Client(http2=True) as client:
-        resp = client.post(url, headers=headers, content=frame, timeout=15.0)
-        if resp.status_code != 200: return None
-        data_len = int.from_bytes(resp.content[1:5], 'big')
-        out = Response()
-        out.ParseFromString(resp.content[5:5+data_len])
-        return out
+    url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
+    
+    tid = "Router-0100000000000000008B65AD"
+    print(f"[*] Deep History Probe for Router: {tid}")
+    
+    req = Request(target_id=tid, get_history=GetHistoryRequest())
+    ser = req.SerializeToString()
+    frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
+    
+    try:
+        res = client.post(url, headers=headers, content=frame)
+        if res.status_code == 200 and len(res.content) > 5:
+            msg_len = int.from_bytes(res.content[1:5], 'big')
+            out = Response()
+            out.ParseFromString(res.content[5:5+msg_len])
+            rt = out.WhichOneof('response')
+            d = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
+            
+            with open("super_history_dump.json", "w") as f: json.dump(d, f, indent=2)
+            print(f"  [SUCCESS] Full history dumped to super_history_dump.json. Keys: {list(d.keys())}")
+            
+            # Search for ANY key that might contain a log or list
+            for k in d.keys():
+                if isinstance(d[k], list) and len(d[k]) > 0:
+                    print(f"  Key '{k}' contains a list of {len(d[k])} items.")
+                    if isinstance(d[k][0], dict):
+                        print(f"    Sample item keys: {list(d[k][0].keys())}")
+        else:
+            print(f"  Failed. HTTP {res.status_code} | Len: {len(res.content)}")
+    except Exception as e:
+        print(f"  Error: {e}")
 
-def main():
-    with open("cookie.txt", "r") as f:
-        cookie = f.read().strip()
-    
-    dish_id = "ut10588f9d-45017219-5815f472"
-    url = "https://api2.starlink.com/SpaceX.API.Device.Device/Handle"
-    
-    print(f"[*] Fetching SUPER DEEP History for: {dish_id}")
-    req = Request(target_id=dish_id, get_history=GetHistoryRequest())
-    resp = _make_grpc_web_call(req, cookie, url)
-    
-    if resp and resp.HasField("dish_get_history"):
-        print("[+] Captured History Buffer.")
-        data = MessageToDict(resp.dish_get_history, always_print_fields_with_no_presence=True)
-        history = data.get("history", data)
-        outages = history.get("outages", [])
-        
-        print(f"\n[!] Total Events in Buffer: {len(outages)}")
-        print("-" * 60)
-        for i, o in enumerate(outages):
-            ts_ns = int(o.get("startTimestampNs", 0))
-            # Rough estimate of relative time
-            # Starlink usually uses uptime-relative NS or monotonic ns
-            cause = o.get("cause", "UNKNOWN")
-            dur_s = float(o.get("durationNs", 0)) / 1e9
-            print(f"Event {i+1}: {cause} | Duration: {dur_s:.2f}s | TS: {ts_ns}")
-        print("-" * 60)
-        
-        with open("scripts/super_history_dump.json", "w") as f:
-            json.dump(data, f, indent=2)
-    else:
-        print("[-] Failed to get response.")
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": run()

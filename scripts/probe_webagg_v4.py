@@ -12,14 +12,13 @@ def run():
     fresh_cookie = "; ".join([f"{c.name}={c.value}" for c in client.cookies.jar])
     headers = {"User-Agent": UA, "cookie": fresh_cookie or raw_cookie, "x-xsrf-token": xsrf}
 
-    # SL ID
-    sl = "SL-1991965-88036-90"
-
+    # Try common high-level aggregation endpoints
     urls = [
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/telemetry/history",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/outages",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/alerts",
-        f"https://api.starlink.com/webagg/v2/accounts/service-lines/{sl}/notifications",
+        "https://api.starlink.com/webagg/v2/accounts/service-lines",
+        "https://api.starlink.com/webagg/v2/accounts/notifications",
+        "https://api.starlink.com/webagg/v2/accounts/events",
+        "https://api.starlink.com/webagg/v2/accounts/me/events",
+        "https://api.starlink.com/webagg/v2/events",
     ]
 
     for url in urls:
@@ -29,9 +28,7 @@ def run():
             print(f"  Status: {r.status_code}")
             if r.status_code == 200:
                 print(f"  [SUCCESS] Received data.")
-                print(json.dumps(r.json(), indent=2)[:500])
-            else:
-                print(f"  Error: {r.text[:200]}")
+                print(json.dumps(r.json(), indent=2)[:1000])
         except Exception as e:
             print(f"  Error: {e}")
 

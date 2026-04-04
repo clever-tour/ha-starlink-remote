@@ -1,45 +1,20 @@
-import httpx, re, os
+import httpx, re, json, os
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
-def run_test():
-    with open("cookie.txt", "r") as f:
-        raw_cookie = f.read().strip()
-
+def run():
+    with open("cookie.txt", "r") as f: raw_cookie = f.read().strip()
     client = httpx.Client(http2=True, follow_redirects=True)
-    headers = {"User-Agent": UA, "cookie": raw_cookie}
-    
-    try:
-        # User said click 'your subscription' which is /account/service-line
-        r = client.get("https://www.starlink.com/account/service-line", headers=headers)
-        print(f"Status: {r.status_code}")
-        # Search for IDs specifically
-        print("--- SEARCH RESULTS ---")
-        for match in re.findall(r'selectedDevice=[A-Fa-f0-9-]+', r.text):
-            print(f"Found match: {match}")
-        
-        # Look for the user terminal ID pattern specifically
-        for match in re.findall(r'ut[a-z0-9-]{26,36}', r.text):
-            print(f"Found UT: {match}")
-            
-        # Look for router ID pattern
-        for match in re.findall(r'Router-[A-Fa-f0-9]{24}', r.text):
-            print(f"Found Router: {match}")
+    client.get("https://www.starlink.com/account/home", headers={"User-Agent": UA, "cookie": raw_cookie})
+    xsrf = client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default='')
+    client.get("https://api.starlink.com/auth-rp/auth/user", headers={"User-Agent": UA, "cookie": raw_cookie, "x-xsrf-token": xsrf})
 
-        # Dump a bit of the HTML around where these usually are
-        print("\n--- HTML SNIPPET ---")
-        idx = r.text.find("serviceLine")
-        if idx != -1:
-            print(r.text[idx-500:idx+2000])
-        else:
-            print("Could not find 'serviceLine' string in HTML.")
-            # Search for PRELOADED_STATE
-            idx2 = r.text.find("__PRELOADED_STATE__")
-            if idx2 != -1:
-                print(r.text[idx2:idx2+2000])
+    fresh_cookie = "; ".join([f"{c.name}={c.value}" for c in client.cookies.jar])
+    headers = {"User-Agent": UA, "cookie": fresh_cookie or raw_cookie, "x-xsrf-token": xsrf}
 
-    except Exception as e:
-        print(f"Error: {e}")
+    r = client.get("https://api.starlink.com/webagg/v2/accounts/service-lines", headers=headers)
+    if r.status_code == 200:
+        with open("service_lines_full.json", "w") as f: json.dump(r.json(), f, indent=2)
+        print("[SUCCESS] service_lines_full.json saved.")
 
-if __name__ == "__main__":
-    run_test()
+if __name__ == "__main__": run()

@@ -5,7 +5,7 @@ from google.protobuf.json_format import MessageToDict
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "custom_components" / "starlink_remote"))
 
-from spacex.api.device.device_pb2 import Request, Response, GetHistoryRequest
+from spacex.api.device.device_pb2 import Request, Response, GetStatusRequest
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
@@ -23,10 +23,10 @@ def run():
     }
     url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
     
-    tid = "ut10588f9d-45017219-5815f472"
-    print(f"[*] Deep History Probe for: {tid}")
+    tid = "Router-0100000000000000008B65AD"
+    print(f"[*] Full Status Probe for Router: {tid}")
     
-    req = Request(target_id=tid, get_history=GetHistoryRequest())
+    req = Request(target_id=tid, get_status=GetStatusRequest())
     ser = req.SerializeToString()
     frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
     
@@ -39,16 +39,23 @@ def run():
             rt = out.WhichOneof('response')
             d = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
             
-            with open("full_history_dump.json", "w") as f: json.dump(d, f, indent=2)
-            print(f"  [SUCCESS] Full history dumped to full_history_dump.json. Keys: {list(d.keys())}")
+            with open("router_full_status.json", "w") as f: json.dump(d, f, indent=2)
+            print(f"  [SUCCESS] Full status dumped. Keys: {list(d.keys())}")
             
-            if 'outages' in d:
-                print(f"  Found {len(d['outages'])} total outages in the last 12-24h.")
-                # Print unique causes
-                causes = set(o.get('cause') for o in d['outages'])
-                print(f"  Unique outage causes: {causes}")
+            # Search for anything with 'count' or 'stats'
+            def find_counts(obj, path=""):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if 'count' in k.lower() or 'stats' in k.lower() or 'event' in k.lower():
+                            print(f"  Found: {path}.{k} = {v}")
+                        find_counts(v, f"{path}.{k}")
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj):
+                        find_counts(item, f"{path}[{i}]")
+
+            find_counts(d)
         else:
-            print(f"  Failed. HTTP {res.status_code} | Len: {len(res.content)}")
+            print(f"  Failed. HTTP {res.status_code}")
     except Exception as e:
         print(f"  Error: {e}")
 

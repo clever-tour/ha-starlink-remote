@@ -20,11 +20,11 @@ def run():
     sl = "SL-1991965-88036-90"
 
     urls = [
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/history",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/notifications",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/telemetry",
-        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/telemetry",
-        "https://api.starlink.com/webagg/v2/accounts/history",
+        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/events",
+        f"https://api.starlink.com/webagg/v2/accounts/{account}/service-lines/{sl}/alerts",
+        f"https://api.starlink.com/webagg/v2/service-lines/{sl}/status",
+        f"https://api.starlink.com/webagg/v2/accounts/notifications",
+        f"https://api.starlink.com/webagg/v2/accounts/alerts",
     ]
 
     for url in urls:
