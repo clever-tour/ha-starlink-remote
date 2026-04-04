@@ -5,7 +5,8 @@ from datetime import timedelta
 from typing import Any, Callable
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from .const import DOMAIN, CONF_COOKIE, CONF_SCAN_INTERVAL, DATA_DEVICES, DATA_WIFI_CLIENTS, DATA_USAGE
+from homeassistant.components import persistent_notification
+from .const import DOMAIN, CONF_COOKIE, CONF_SCAN_INTERVAL, DATA_DEVICES, DATA_WIFI_CLIENTS, DATA_USAGE, CONF_COOKIE_FILE
 
 _LOGGER = logging.getLogger(__name__)
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
@@ -21,12 +22,17 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store persistent data in the standard .storage location
         self._persist_dir = hass.config.path('.storage', 'starlink-remote-cookie-storage')
         self._history_persist_path = os.path.join(self._persist_dir, 'history_persistence.json')
+        self._cookie_persist_path = os.path.join(self._persist_dir, CONF_COOKIE_FILE)
+        
         self.discovered_ids: set[str] = set()
         self._raw_cookie = ""
         self._xsrf_token = ""
         
-        # Use a persistent client to maintain the H2 connection and internal cookie jar.
-        self._client = httpx.Client(http2=True, timeout=15.0, follow_redirects=True)
+        # Error tracking for 401 persistent notifications
+        self._auth_failure_start: float | None = None
+        self._notification_sent = False
+        
+        self._client: httpx.Client | None = None
         
         super().__init__(
             hass, _LOGGER, name=DOMAIN, 
@@ -35,95 +41,131 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_setup(self):
         """Perform initial data loading and session priming."""
-        _LOGGER.warning("[SETUP] Starting _async_setup...")
-        await self.hass.async_add_executor_job(self._load_persistent_data)
+        await self.hass.async_add_executor_job(self._init_client_and_load_data)
+        await self.hass.async_add_executor_job(self._refresh_session)
+        await self.hass.async_add_executor_job(self._discover_hardware)
+
+    def _init_client_and_load_data(self):
+        """Initialize the persistent client and load data from disk (SyncWorker)."""
+        if self._client is None:
+            self._client = httpx.Client(http2=True, timeout=15.0, follow_redirects=True)
         
-        # Priority: Local dev file -> Config Entry
-        cookie_file = os.path.join(os.path.dirname(__file__), 'cookie.txt')
-        if os.path.exists(cookie_file):
+        self._load_persistent_data()
+        
+        cookie_file_dev = os.path.join(os.path.dirname(__file__), 'cookie.txt')
+        
+        if os.path.exists(self._cookie_persist_path):
             try:
-                _LOGGER.warning("[SETUP] Loading cookie from file...")
-                with open(cookie_file, 'r') as f:
+                with open(self._cookie_persist_path, 'r') as f:
                     self._raw_cookie = f.read().strip()
             except Exception as e:
-                _LOGGER.error("Failed to read cookie.txt: %s", e)
-        else:
+                _LOGGER.error("Failed to read persistent cookie: %s", e)
+        elif os.path.exists(cookie_file_dev):
+            try:
+                with open(cookie_file_dev, 'r') as f:
+                    self._raw_cookie = f.read().strip()
+            except Exception as e:
+                _LOGGER.error("Failed to read dev cookie.txt: %s", e)
+        
+        if not self._raw_cookie:
             self._raw_cookie = self._entry.data.get(CONF_COOKIE, "")
 
         self._sync_cookies_to_client()
-        _LOGGER.warning("[SETUP] Refreshing session...")
-        await self.hass.async_add_executor_job(self._refresh_session)
-        _LOGGER.warning("[SETUP] Discovering hardware...")
-        await self.hass.async_add_executor_job(self._discover_hardware)
-        _LOGGER.warning("[SETUP] Finished _async_setup.")
 
     def _sync_cookies_to_client(self):
-        """Inject the raw cookie string into the httpx.Client jar for automatic subdomain handling."""
-        if not self._raw_cookie: return
+        """Inject the raw cookie string into the httpx.Client jar."""
+        if not self._raw_cookie or not self._client: return
         for part in self._raw_cookie.split(';'):
             if '=' in part:
                 k, v = part.strip().split('=', 1)
                 self._client.cookies.set(k, v, domain='.starlink.com')
         
-        # Extract XSRF token for the mandatory 'x-xsrf-token' header
         self._xsrf_token = self._client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default='')
         if not self._xsrf_token:
             match = re.search(r'XSRF-TOKEN=([^;]+)', self._raw_cookie)
             if match: self._xsrf_token = match.group(1)
 
     def _load_persistent_data(self):
-        """Restore discovered hardware IDs from disk to survive restarts."""
+        """Restore discovered hardware IDs from disk."""
         try:
-            # Ensure storage directory exists
-            _LOGGER.warning("[PERSIST] Loading from %s", self._persist_dir)
             os.makedirs(self._persist_dir, exist_ok=True)
             if os.path.exists(self._history_persist_path):
                 with open(self._history_persist_path, 'r') as f:
                     h = json.load(f)
                     for tid in h.get('discovered_ids', []):
                         self.discovered_ids.add(tid)
-                _LOGGER.warning("[PERSIST] Restored IDs: %s", self.discovered_ids)
-        except Exception as e:
-            _LOGGER.error("[PERSIST] Load failed: %s", e)
+        except Exception: pass
 
     def _save_persistent_data(self):
-        """Persist discovered hardware IDs to disk."""
+        """Persist discovered hardware IDs and current cookie to disk."""
         try:
             os.makedirs(self._persist_dir, exist_ok=True)
-            _LOGGER.warning("[PERSIST] Saving to %s", self._history_persist_path)
             with open(self._history_persist_path, 'w') as f:
                 json.dump({'discovered_ids': list(self.discovered_ids)}, f)
+            
+            if self._raw_cookie:
+                with open(self._cookie_persist_path, 'w') as f:
+                    f.write(self._raw_cookie)
         except Exception as e:
-            _LOGGER.error("[PERSIST] Save failed: %s", e)
+            _LOGGER.error("Save failed: %s", e)
 
     def _refresh_session(self) -> bool:
-        """
-        Execute the session priming cycle.
-        """
+        """Execute the session priming cycle."""
+        if not self._client: return False
         try:
             headers = {"User-Agent": UA, "cookie": self._raw_cookie, "x-xsrf-token": self._xsrf_token}
-            # Prime the SSO session
-            self._client.get('https://www.starlink.com/account/home', headers=headers)
-            # Sync tokens to API subdomain
-            self._client.get('https://api.starlink.com/auth-rp/auth/user', headers=headers)
+            r1 = self._client.get('https://www.starlink.com/account/home', headers=headers)
+            r2 = self._client.get('https://api.starlink.com/auth-rp/auth/user', headers=headers)
             
-            # Export the updated jar back to the internal string for raw header injection if needed
+            if r1.status_code == 401 or r2.status_code == 401:
+                self._handle_auth_failure()
+                return False
+            
+            self._handle_auth_success()
+            
             new_jar = "; ".join([f"{c.name}={c.value}" for c in self._client.cookies.jar])
             if new_jar:
                 self._raw_cookie = new_jar
                 self._xsrf_token = self._client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default=self._xsrf_token)
+                self._save_persistent_data()
             _LOGGER.warning("[SESSION] Refreshed successfully.")
             return True
-        except Exception as e:
-            _LOGGER.error("[SESSION] Refresh failed: %s", e)
+        except Exception:
             return False
 
+    def _handle_auth_failure(self):
+        """Track consecutive auth failures and notify user if threshold exceeded."""
+        now = _time.time()
+        if self._auth_failure_start is None:
+            self._auth_failure_start = now
+        
+        if not self._notification_sent and (now - self._auth_failure_start >= 60):
+            _LOGGER.warning("Persistent 401 detected. Sending notification.")
+            persistent_notification.create(
+                self.hass,
+                "Starlink session has expired. Please re-enter your browser cookie in the integration settings to restore telemetry.",
+                title="Starlink Remote Authentication Error",
+                notification_id="starlink_remote_auth_error"
+            )
+            self._notification_sent = True
+            self.hass.add_job(
+                self.hass.config_entries.flow.async_init(
+                    DOMAIN, context={"source": "reauth"}, data=self._entry.data
+                )
+            )
+
+    def _handle_auth_success(self):
+        """Reset auth failure tracking on success."""
+        if self._auth_failure_start is not None:
+            self._auth_failure_start = None
+            if self._notification_sent:
+                persistent_notification.dismiss(self.hass, "starlink_remote_auth_error")
+                self._notification_sent = False
+
     def _discover_hardware(self):
-        """
-        Dynamically identify Dishes and Routers via the management API and dashboard.
-        """
+        """Dynamically identify Dishes and Routers."""
+        if not self._client: return
         headers = {"User-Agent": UA, "cookie": self._raw_cookie, "x-xsrf-token": self._xsrf_token}
-        # API-based discovery
         try:
             r = self._client.get("https://api.starlink.com/webagg/v2/accounts/service-lines", headers=headers)
             if r.status_code == 200:
@@ -137,7 +179,6 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if rid: self.discovered_ids.add(f"Router-{rid}")
         except Exception: pass
 
-        # HTML-based discovery fallback
         try:
             r = self._client.get("https://www.starlink.com/account/home", headers=headers)
             if r.status_code == 200:
@@ -148,7 +189,6 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception: pass
 
         if self.discovered_ids:
-            _LOGGER.warning("[DISCOVERY] Found: %s", self.discovered_ids)
             self._save_persistent_data()
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -159,9 +199,8 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return await self.hass.async_add_executor_job(self._fetch_all)
 
     def _fetch_all(self) -> dict[str, Any]:
-        """
-        Poll telemetry for all identified hardware using gRPC-Web binary tunneling.
-        """
+        """Poll telemetry using gRPC-Web binary tunneling."""
+        if not self._client: return {DATA_DEVICES: {}}
         from .spacex.api.device.device_pb2 import Request, GetStatusRequest, GetHistoryRequest, Response
         from google.protobuf.json_format import MessageToDict
         
@@ -183,7 +222,12 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ser = req.SerializeToString()
                 frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
                 res = self._client.post(url, headers=headers, content=frame)
+                
+                if res.status_code == 401:
+                    self._handle_auth_failure()
+                
                 if res.status_code == 200 and len(res.content) > 5:
+                    self._handle_auth_success()
                     msg_len = int.from_bytes(res.content[1:5], 'big')
                     out = Response()
                     out.ParseFromString(res.content[5:5+msg_len])
@@ -202,6 +246,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ser_h = req_h.SerializeToString()
                 frame_h = b'\x00' + len(ser_h).to_bytes(4, 'big') + ser_h
                 res_h = self._client.post(url, headers=headers, content=frame_h)
+                
                 if res_h.status_code == 200 and len(res_h.content) > 5:
                     msg_len_h = int.from_bytes(res_h.content[1:5], 'big')
                     out_h = Response()

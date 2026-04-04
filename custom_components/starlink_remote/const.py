@@ -5,6 +5,7 @@ CONF_NAME = 'name'
 CONF_COOKIE_DIR = 'cookie_dir'
 DEFAULT_SCAN_INTERVAL = 60
 DEFAULT_COOKIE_DIR = '/config/.storage/starlink-remote-cookie-storage'
+CONF_COOKIE_FILE = 'cookie.txt'
 
 # Data keys in coordinator.data
 DATA_DEVICES = 'devices'  # Will be a dict: { target_id: { status: {}, history: {}, ... } }
