@@ -1,4 +1,7 @@
 {
   "name": "Starlink Remote",
-  "render_readme": true
+  "render_readme": true,
+  "homeassistant": "2025.12",
+  "iot_class": "cloud_polling",
+  "support_link": "https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT"
 }
