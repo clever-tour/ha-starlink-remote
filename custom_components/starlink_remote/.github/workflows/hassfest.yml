@@ -1,0 +1,14 @@
+name: Validate with hassfest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub repository
+        uses: actions/checkout@v4
+      - name: Validate with hassfest
+        uses: home-assistant/actions/hassfest@master
