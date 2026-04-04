@@ -10,6 +10,7 @@ This Home Assistant integration allows for remote monitoring of Starlink hardwar
 - **Hardware Grouping**: Entities are grouped under their respective hardware devices.
 - **Remote Access**: No local network connection to the dish is required.
 - **Metrics**: Throughput, obstruction data, orientation, uptime, and WiFi client counts.
+- **Robust Auth**: Automatically handles session persistence and persistent cookie recovery.
 
 ## How to use
 1. Copy the `starlink_remote` folder to your `custom_components/` directory.
@@ -27,7 +28,10 @@ This integration requires a browser cookie to authenticate with the Starlink clo
 ## Technical Notes
 - **Polling**: The integration polls data via a gRPC-Web tunnel to the Starlink management API.
 - **Session Persistence**: It performs a session "priming" cycle on every update to keep the connection alive.
-- **XSRF**: It automatically handles XSRF token synchronization between subdomains.
+- **Portable**: Uses standard Home Assistant storage patterns (`.storage/starlink-remote-cookie-storage/`).
+
+## Support
+For help or feedback, join our Signal group: [Join Signal Group](https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT)
 
 ---
 *Created with gemini-cli and gemini-3-pro.*

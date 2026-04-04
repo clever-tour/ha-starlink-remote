@@ -4,7 +4,10 @@
   "requirements": ["httpx>=0.27.0", "protobuf>=6.32.0", "h2>=4.1.0"],
   "config_flow": true,
   "iot_class": "cloud_polling",
-  "version": "1.5.0",
+  "version": "1.6.0",
+  "homeassistant": "2025.12",
+  "issue_tracker": "https://github.com/Eitol/starlink-client/issues",
   "documentation": "https://github.com/Eitol/starlink-client",
+  "support_link": "https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT",
   "codeowners": ["@stijn"]
 }
