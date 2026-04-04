@@ -1,0 +1,16 @@
+# Sensitive session data
+cookie.txt
+.starlink_cookies/
+*.json
+!manifest.json
+!hacs.json
+!strings.json
+!translations/*.json
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS artifacts
+.DS_Store
