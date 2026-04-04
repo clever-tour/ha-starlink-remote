@@ -3,15 +3,35 @@
     "step": {
       "user": {
         "title": "Starlink Remote",
-        "description": "Enter your Starlink browser cookie to auto-discover all devices associated with your account.",
+        "description": "Enter your Starlink browser cookie to auto-discover all devices.",
         "data": {
           "cookie": "Browser Cookie String"
         }
+      },
+      "reauth_confirm": {
+        "title": "Authentication Expired",
+        "description": "Your Starlink session has expired. Please provide a fresh browser cookie to restore telemetry.",
+        "data": {
+          "cookie": "Fresh Browser Cookie String"
+        }
       }
     },
+    "abort": {
+      "reauth_successful": "Authentication refreshed successfully."
+    },
     "error": {
-      "invalid_auth": "Authentication failed. Please verify your cookie string is current.",
-      "no_devices_found": "No Starlink hardware was found on this account."
+      "invalid_auth": "Authentication failed. Check your cookie.",
+      "no_devices_found": "No Starlink hardware found on this account."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Starlink Remote",
+        "data": {
+          "cookie": "Update Browser Cookie String"
+        }
+      }
     }
   }
 }
