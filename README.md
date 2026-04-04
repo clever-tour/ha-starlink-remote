@@ -1,10 +1,12 @@
 # Starlink Remote for Home Assistant
 
+A Home Assistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud API.
+
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HACS Action](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml)
 [![Validate with hassfest](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hassfest.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hassfest.yml)
 
-A Home Assistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud API.
+**Topics:** `home-assistant`, `hacs`, `integration`, `starlink`, `remote-monitoring`
 
 > [!IMPORTANT]
 > This integration is provided "as-is". It has been primarily tested with the **Starlink Mini (v4)**. Compatibility with older circular or rectangular dishes is expected but not guaranteed.
