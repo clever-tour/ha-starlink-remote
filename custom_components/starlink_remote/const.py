@@ -4,7 +4,8 @@ CONF_SCAN_INTERVAL = 'scan_interval'
 CONF_NAME = 'name'
 CONF_COOKIE_DIR = 'cookie_dir'
 DEFAULT_SCAN_INTERVAL = 60
-DEFAULT_COOKIE_DIR = '/config/.storage/starlink-remote-cookie-storage'
+# Storage name relative to .storage/
+STORAGE_DIR = 'starlink-remote-cookie-storage'
 CONF_COOKIE_FILE = 'cookie.txt'
 
 # Data keys in coordinator.data

@@ -6,7 +6,7 @@ from typing import Any, Callable
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.components import persistent_notification
-from .const import DOMAIN, CONF_COOKIE, CONF_SCAN_INTERVAL, DATA_DEVICES, DATA_WIFI_CLIENTS, DATA_USAGE, CONF_COOKIE_FILE
+from .const import DOMAIN, CONF_COOKIE, CONF_SCAN_INTERVAL, DATA_DEVICES, DATA_WIFI_CLIENTS, DATA_USAGE, CONF_COOKIE_FILE, STORAGE_DIR
 
 _LOGGER = logging.getLogger(__name__)
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
@@ -19,8 +19,8 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: Any) -> None:
         """Initialize the coordinator."""
         self._entry = entry
-        # Store persistent data in the standard .storage location
-        self._persist_dir = hass.config.path('.storage', 'starlink-remote-cookie-storage')
+        # Store persistent data in the standard .storage location (portable)
+        self._persist_dir = hass.config.path('.storage', STORAGE_DIR)
         self._history_persist_path = os.path.join(self._persist_dir, 'history_persistence.json')
         self._cookie_persist_path = os.path.join(self._persist_dir, CONF_COOKIE_FILE)
         
@@ -52,6 +52,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         
         self._load_persistent_data()
         
+        # Local development override (optional)
         cookie_file_dev = os.path.join(os.path.dirname(__file__), 'cookie.txt')
         
         if os.path.exists(self._cookie_persist_path):
