@@ -1,37 +1,57 @@
 # Starlink Remote for Home Assistant
 
-This Home Assistant integration allows for remote monitoring of Starlink hardware via the cloud API. It was created using **gemini-cli** with the **gemini-3-pro** model.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![HACS Action](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml)
+[![Validate with hassfest](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hassfest.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hassfest.yml)
+
+A Home Assistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud API.
 
 > [!IMPORTANT]
-> This integration is provided "as-is" without any claims on quality or reliability. It has only been tested with the **Starlink Mini (v4)**. Compatibility with other models is unknown.
+> This integration is provided "as-is". It has been primarily tested with the **Starlink Mini (v4)**. Compatibility with older circular or rectangular dishes is expected but not guaranteed.
 
 ## Features
-- **Auto-Discovery**: Finds your Starlink Dish and Router automatically via your account.
-- **Hardware Grouping**: Entities are grouped under their respective hardware devices.
-- **Remote Access**: No local network connection to the dish is required.
-- **Metrics**: Throughput, obstruction data, orientation, uptime, and WiFi client counts.
-- **Robust Auth**: Automatically handles session persistence and persistent cookie recovery.
+- **Remote Access**: Monitor your dish from anywhere without needing to be on the local Starlink WiFi.
+- **Auto-Discovery**: Automatically finds all Dishes and Routers associated with your account.
+- **Metrics**: Real-time throughput (Up/Down), obstruction fraction, ping latency, orientation (azimuth/tilt), and uptime.
+- **WiFi Insights**: Monitor connected client counts and hardware status.
+- **Remote Control**: Support for **Reboot**, **Stow**, and **Unstow** commands directly from Home Assistant.
+- **Robust Auth**: Handles session persistence and persistent cookie recovery.
 
-## How to use
-1. Copy the `starlink_remote` folder to your `custom_components/` directory.
-2. Restart Home Assistant.
-3. Add the integration through the UI (**Settings > Devices & Services**).
+## Installation
 
-## Getting your Login Cookie
-This integration requires a browser cookie to authenticate with the Starlink cloud.
+### Option 1: HACS (Recommended)
+1. Open **HACS** in your Home Assistant instance.
+2. Click the three dots in the top right and select **Custom repositories**.
+3. Add `https://github.com/clever-tour/ha-starlink-remote` with category `Integration`.
+4. Click **Install**.
+5. Restart Home Assistant.
+
+### Option 2: Manual
+1. Download the latest release.
+2. Copy the `custom_components/starlink_remote` folder to your HA `config/custom_components/` directory.
+3. Restart Home Assistant.
+
+## Configuration
+
+1. Go to **Settings > Devices & Services**.
+2. Click **Add Integration** and search for **Starlink Remote**.
+3. Enter your Starlink browser cookie (see below).
+
+### How to get your Login Cookie
+This integration requires a browser session cookie to communicate with the Starlink cloud.
 1. Log in to [starlink.com/account/home](https://www.starlink.com/account/home).
-2. Open Browser Developer Tools (F12) and go to the **Network** tab.
+2. Open Browser Developer Tools (`F12`) and go to the **Network** tab.
 3. Refresh the page.
-4. Click on any request to `www.starlink.com` and find the `cookie:` field in the **Request Headers**.
-5. Copy the entire string and paste it into the integration configuration.
+4. Click on any request to `www.starlink.com` and find the `cookie:` header in the **Request Headers** section.
+5. Copy the **entire string** and paste it into the Home Assistant configuration flow.
 
-## Technical Notes
-- **Polling**: The integration polls data via a gRPC-Web tunnel to the Starlink management API.
-- **Session Persistence**: It performs a session "priming" cycle on every update to keep the connection alive.
-- **Portable**: Uses standard Home Assistant storage patterns (`.storage/starlink-remote-cookie-storage/`).
+## Credits & Acknowledgments
+Special thanks to **Eitol** for the excellent work on the [starlink-client](https://pypi.org/project/starlink-client/) library, which provided the foundational code examples and gRPC logic used to build this integration.
 
 ## Support
-For help or feedback, join our Signal group: [Join Signal Group](https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT)
+For help, bug reports, or feedback:
+- **GitHub Issues**: [Open an issue](https://github.com/clever-tour/ha-starlink-remote/issues)
+- **Signal Group**: [Join our community](https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT)
 
 ---
-*Created with gemini-cli and gemini-3-pro.*
+*Created with gemini-cli.*
