@@ -7,7 +7,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "custom_components" / "starlink_remote"))
 
 try:
-    from spacex.api.device.device_pb2 import Request, GetStatusRequest, GetHistoryRequest, Response
+    from spacex.api.device.device_pb2 import Request, GetStatusRequest, Response
 except ImportError:
     print("[-] Error: Could not import protobuf definitions.")
     sys.exit(1)
@@ -15,97 +15,97 @@ except ImportError:
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
 def run_test():
-    if not os.path.exists("cookie.txt"):
-        print("[-] cookie.txt not found.")
-        return
-
     with open("cookie.txt", "r") as f:
         raw_cookie = f.read().strip()
 
-    # 1. Setup Client
     client = httpx.Client(http2=True, follow_redirects=True)
     
-    # 2. Extract XSRF
-    xsrf = ""
-    xsrf_match = re.search(r'XSRF-TOKEN=([^;]+)', raw_cookie)
-    if xsrf_match:
-        xsrf = xsrf_match.group(1)
-        print(f"[+] Found XSRF Token: {xsrf[:15]}...")
-
-    headers = {
-        "User-Agent": UA,
-        "cookie": raw_cookie,
-        "origin": "https://www.starlink.com",
-        "referer": "https://www.starlink.com/account/home",
-        "x-xsrf-token": xsrf
-    }
-
-    # 3. Hardware Discovery
-    print("\n[*] Step 1: Hardware Discovery...")
-    discovered = set()
+    # 1. Establish Session and Refresh Cookie
+    print("[*] Priming Session & Fetching Fresh Cookie...")
+    headers = {"User-Agent": UA, "cookie": raw_cookie}
     try:
-        r = client.get("https://api.starlink.com/webagg/v2/accounts/service-lines", headers=headers)
+        # Hit home page to ensure we have a fresh session token/XSRF
+        r = client.get("https://www.starlink.com/account/home", headers=headers)
         print(f"  [HTTP] Status: {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
+        
+        # Capture fresh cookie string from client jar
+        fresh_cookie = "; ".join([f"{c.name}={c.value}" for c in client.cookies.jar])
+        # Merge with initial cookies to ensure we keep the SSO tokens
+        # (This mimics the browser's persistent state)
+        
+        # 2. Discover Hardware IDs
+        print("\n[*] Discovering Hardware IDs from Account Dashboard...")
+        # Method A: window.__PRELOADED_STATE__
+        discovered_ids = set()
+        state_match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*({.*?});', r.text)
+        if state_match:
+            print("  [+] Found Preloaded State")
+            # Look for serial numbers or target IDs
+            ids = re.findall(r'"([A-Fa-f0-9]{24})"', state_match.group(1))
+            uts = re.findall(r'"(ut[a-f0-9-]{36})"', state_match.group(1))
+            discovered_ids.update(ids)
+            discovered_ids.update(uts)
+        
+        # Method B: selectedDevice in URLs
+        dev_urls = re.findall(r'selectedDevice=([A-Fa-f0-9-]+)', r.text)
+        discovered_ids.update(dev_urls)
+        
+        # Method C: service-lines API
+        xsrf = client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default='')
+        api_headers = {
+            "User-Agent": UA, "cookie": fresh_cookie or raw_cookie, "x-xsrf-token": xsrf,
+            "origin": "https://www.starlink.com", "referer": "https://www.starlink.com/account/home"
+        }
+        r_lines = client.get("https://api.starlink.com/webagg/v2/accounts/service-lines", headers=api_headers)
+        if r_lines.status_code == 200:
+            data = r_lines.json()
             for res in data.get("content", {}).get("results", []):
                 for ut in res.get("userTerminals", []):
                     uid = ut.get("userTerminalId")
-                    if uid: discovered.add(f"ut{uid}")
+                    if uid: discovered_ids.add(f"ut{uid}")
                     for rtr in ut.get("routers", []):
                         rid = rtr.get("routerId")
-                        if rid: discovered.add(f"Router-{rid}")
-        print(f"  [+] Discovered: {discovered}")
-    except Exception as e:
-        print(f"  [-] Discovery Error: {e}")
+                        if rid: discovered_ids.add(f"Router-{rid}")
 
-    if not discovered:
-        discovered = {"Router-0100000000000000008B65AD", "ut10588f9d-45017219-5815f472"}
-        print(f"  [!] Using fallbacks: {discovered}")
+        print(f"  [+] FINAL DISCOVERED IDS: {discovered_ids}")
 
-    # 4. Telemetry Polling
-    print("\n[*] Step 2: Telemetry Polling...")
-    url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
-    
-    grpc_headers = headers.copy()
-    grpc_headers.update({
-        "accept": "*/*",
-        "content-type": "application/grpc-web+proto",
-        "x-grpc-web": "1"
-    })
+        if not discovered_ids:
+            print("  [!] No IDs discovered. Polling will fail.")
+            return
 
-    for tid in discovered:
-        print(f"\n>>> Polling Target: {tid}")
+        # 3. Telemetry Polling
+        print("\n[*] Step 3: Telemetry Polling (gRPC-Web)...")
+        url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
         
-        # Test GetStatus
-        req = Request(target_id=tid, get_status=GetStatusRequest())
-        ser = req.SerializeToString()
-        frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
-        
-        try:
-            res = client.post(url, headers=grpc_headers, content=frame)
-            print(f"  [HTTP] Status: {res.status_code} | Length: {len(res.content)}")
+        for tid in discovered_ids:
+            print(f"\n>>> TARGET: {tid}")
+            req = Request(target_id=tid, get_status=GetStatusRequest())
+            ser = req.SerializeToString()
+            frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
             
-            if len(res.content) > 5:
-                msg_len = int.from_bytes(res.content[1:5], 'big')
-                print(f"  [gRPC] Frame Type: {res.content[0]} | Msg Length: {msg_len}")
-                
-                out = Response()
-                out.ParseFromString(res.content[5:5+msg_len])
-                rt = out.WhichOneof('response')
-                if rt:
-                    print(f"  [SUCCESS] Received: {rt}")
-                    rd = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
-                    if 'downlink_throughput_bps' in rd:
-                        print(f"    - Downlink: {round(float(rd['downlink_throughput_bps'])/1e6, 2)} Mbps")
-                    if 'clients' in rd:
-                        print(f"    - WiFi Clients: {len(rd['clients'])}")
-                else:
-                    print("  [-] Empty Response object.")
-            else:
-                print(f"  [-] Body too short: {binascii.hexlify(res.content)}")
-        except Exception as e:
-            print(f"  [-] Poll Error: {e}")
+            poll_headers = api_headers.copy()
+            poll_headers.update({"content-type": "application/grpc-web+proto", "x-grpc-web": "1"})
+            
+            try:
+                res = client.post(url, headers=poll_headers, content=frame)
+                print(f"  [HTTP] Status: {res.status_code} | Length: {len(res.content)}")
+                if len(res.content) > 5:
+                    msg_len = int.from_bytes(res.content[1:5], 'big')
+                    out = Response()
+                    out.ParseFromString(res.content[5:5+msg_len])
+                    rt = out.WhichOneof('response')
+                    if rt:
+                        print(f"  [SUCCESS] Received: {rt}")
+                        data = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
+                        if 'clients' in data:
+                            print(f"    - WiFi Clients: {len(data['clients'])}")
+                        if 'downlink_throughput_bps' in data:
+                            print(f"    - Downlink: {round(float(data['downlink_throughput_bps'])/1e6, 2)} Mbps")
+            except Exception as e:
+                print(f"  [-] Poll Error: {e}")
+
+    except Exception as e:
+        print(f"  [-] Diagnostic Error: {e}")
 
 if __name__ == "__main__":
     run_test()
