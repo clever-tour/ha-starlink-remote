@@ -2,17 +2,16 @@
   "config": {
     "step": {
       "user": {
+        "title": "Starlink Remote",
+        "description": "Enter your Starlink browser cookie to auto-discover all devices.",
         "data": {
-          "cookie": "Browser Cookie",
-          "router_id": "Router ID",
-          "scan_interval": "Scan Interval (seconds)"
-        }
-      },
-      "select_device": {
-        "data": {
-          "device_id": "Select Device"
+          "cookie": "Browser Cookie String"
         }
       }
+    },
+    "error": {
+      "invalid_auth": "Authentication failed. Check your cookie.",
+      "no_devices_found": "No Starlink hardware found on this account."
     }
   }
 }
