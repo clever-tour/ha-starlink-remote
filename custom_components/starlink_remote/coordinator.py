@@ -11,13 +11,21 @@ _LOGGER = logging.getLogger(__name__)
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36'
 
 class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
+    """
+    Coordinator to handle session persistence, hardware discovery, and gRPC-Web polling.
+    """
+
     def __init__(self, hass: HomeAssistant, entry: Any) -> None:
+        """Initialize the coordinator."""
         self._entry = entry
-        self._persist_dir = hass.config.path('.starlink_cookies')
+        # Store persistent data in the standard .storage location
+        self._persist_dir = hass.config.path('.storage', 'starlink-remote-cookie-storage')
         self._history_persist_path = os.path.join(self._persist_dir, 'history_persistence.json')
         self.discovered_ids: set[str] = set()
         self._raw_cookie = ""
         self._xsrf_token = ""
+        
+        # Use a persistent client to maintain the H2 connection and internal cookie jar.
         self._client = httpx.Client(http2=True, timeout=15.0, follow_redirects=True)
         
         super().__init__(
@@ -26,59 +34,96 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_setup(self):
+        """Perform initial data loading and session priming."""
+        _LOGGER.warning("[SETUP] Starting _async_setup...")
         await self.hass.async_add_executor_job(self._load_persistent_data)
+        
+        # Priority: Local dev file -> Config Entry
         cookie_file = os.path.join(os.path.dirname(__file__), 'cookie.txt')
         if os.path.exists(cookie_file):
             try:
+                _LOGGER.warning("[SETUP] Loading cookie from file...")
                 with open(cookie_file, 'r') as f:
                     self._raw_cookie = f.read().strip()
-            except: pass
+            except Exception as e:
+                _LOGGER.error("Failed to read cookie.txt: %s", e)
         else:
             self._raw_cookie = self._entry.data.get(CONF_COOKIE, "")
+
         self._sync_cookies_to_client()
+        _LOGGER.warning("[SETUP] Refreshing session...")
         await self.hass.async_add_executor_job(self._refresh_session)
+        _LOGGER.warning("[SETUP] Discovering hardware...")
         await self.hass.async_add_executor_job(self._discover_hardware)
+        _LOGGER.warning("[SETUP] Finished _async_setup.")
 
     def _sync_cookies_to_client(self):
+        """Inject the raw cookie string into the httpx.Client jar for automatic subdomain handling."""
         if not self._raw_cookie: return
         for part in self._raw_cookie.split(';'):
             if '=' in part:
                 k, v = part.strip().split('=', 1)
                 self._client.cookies.set(k, v, domain='.starlink.com')
+        
+        # Extract XSRF token for the mandatory 'x-xsrf-token' header
         self._xsrf_token = self._client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default='')
         if not self._xsrf_token:
             match = re.search(r'XSRF-TOKEN=([^;]+)', self._raw_cookie)
             if match: self._xsrf_token = match.group(1)
 
     def _load_persistent_data(self):
+        """Restore discovered hardware IDs from disk to survive restarts."""
         try:
+            # Ensure storage directory exists
+            _LOGGER.warning("[PERSIST] Loading from %s", self._persist_dir)
+            os.makedirs(self._persist_dir, exist_ok=True)
             if os.path.exists(self._history_persist_path):
-                h = json.load(open(self._history_persist_path, 'r'))
-                for tid in h.get('discovered_ids', []):
-                    self.discovered_ids.add(tid)
-        except: pass
+                with open(self._history_persist_path, 'r') as f:
+                    h = json.load(f)
+                    for tid in h.get('discovered_ids', []):
+                        self.discovered_ids.add(tid)
+                _LOGGER.warning("[PERSIST] Restored IDs: %s", self.discovered_ids)
+        except Exception as e:
+            _LOGGER.error("[PERSIST] Load failed: %s", e)
 
     def _save_persistent_data(self):
+        """Persist discovered hardware IDs to disk."""
         try:
             os.makedirs(self._persist_dir, exist_ok=True)
-            json.dump({'discovered_ids': list(self.discovered_ids)}, open(self._history_persist_path, 'w'))
-        except: pass
+            _LOGGER.warning("[PERSIST] Saving to %s", self._history_persist_path)
+            with open(self._history_persist_path, 'w') as f:
+                json.dump({'discovered_ids': list(self.discovered_ids)}, f)
+        except Exception as e:
+            _LOGGER.error("[PERSIST] Save failed: %s", e)
 
     def _refresh_session(self) -> bool:
+        """
+        Execute the session priming cycle.
+        """
         try:
             headers = {"User-Agent": UA, "cookie": self._raw_cookie, "x-xsrf-token": self._xsrf_token}
+            # Prime the SSO session
             self._client.get('https://www.starlink.com/account/home', headers=headers)
+            # Sync tokens to API subdomain
             self._client.get('https://api.starlink.com/auth-rp/auth/user', headers=headers)
+            
+            # Export the updated jar back to the internal string for raw header injection if needed
             new_jar = "; ".join([f"{c.name}={c.value}" for c in self._client.cookies.jar])
             if new_jar:
                 self._raw_cookie = new_jar
                 self._xsrf_token = self._client.cookies.get('XSRF-TOKEN', domain='.starlink.com', default=self._xsrf_token)
+            _LOGGER.warning("[SESSION] Refreshed successfully.")
             return True
-        except:
+        except Exception as e:
+            _LOGGER.error("[SESSION] Refresh failed: %s", e)
             return False
 
     def _discover_hardware(self):
+        """
+        Dynamically identify Dishes and Routers via the management API and dashboard.
+        """
         headers = {"User-Agent": UA, "cookie": self._raw_cookie, "x-xsrf-token": self._xsrf_token}
+        # API-based discovery
         try:
             r = self._client.get("https://api.starlink.com/webagg/v2/accounts/service-lines", headers=headers)
             if r.status_code == 200:
@@ -90,27 +135,36 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         for rtr in ut.get("routers", []):
                             rid = rtr.get("routerId")
                             if rid: self.discovered_ids.add(f"Router-{rid}")
-        except: pass
+        except Exception: pass
+
+        # HTML-based discovery fallback
         try:
             r = self._client.get("https://www.starlink.com/account/home", headers=headers)
             if r.status_code == 200:
                 found = set(re.findall(r"Router-[A-Fa-f0-9]{24}", r.text))
                 found.update(re.findall(r"ut[a-f0-9-]{36}", r.text))
+                found.update(re.findall(r'selectedDevice=([A-Fa-f0-9-]+)', r.text))
                 self.discovered_ids.update(found)
-        except: pass
+        except Exception: pass
+
         if self.discovered_ids:
             _LOGGER.warning("[DISCOVERY] Found: %s", self.discovered_ids)
             self._save_persistent_data()
 
     async def _async_update_data(self) -> dict[str, Any]:
+        """Perform the periodic update cycle."""
         await self.hass.async_add_executor_job(self._refresh_session)
         if not self.discovered_ids:
             await self.hass.async_add_executor_job(self._discover_hardware)
         return await self.hass.async_add_executor_job(self._fetch_all)
 
     def _fetch_all(self) -> dict[str, Any]:
+        """
+        Poll telemetry for all identified hardware using gRPC-Web binary tunneling.
+        """
         from .spacex.api.device.device_pb2 import Request, GetStatusRequest, GetHistoryRequest, Response
         from google.protobuf.json_format import MessageToDict
+        
         data = {DATA_DEVICES: {}}
         all_clients = []
         headers = {
@@ -130,8 +184,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
                 res = self._client.post(url, headers=headers, content=frame)
                 if res.status_code == 200 and len(res.content) > 5:
+                    msg_len = int.from_bytes(res.content[1:5], 'big')
                     out = Response()
-                    out.ParseFromString(res.content[5:5+int.from_bytes(res.content[1:5], 'big')])
+                    out.ParseFromString(res.content[5:5+msg_len])
                     rt = out.WhichOneof('response')
                     if rt:
                         rd = MessageToDict(getattr(out, rt), preserving_proto_field_name=True)
@@ -148,8 +203,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 frame_h = b'\x00' + len(ser_h).to_bytes(4, 'big') + ser_h
                 res_h = self._client.post(url, headers=headers, content=frame_h)
                 if res_h.status_code == 200 and len(res_h.content) > 5:
+                    msg_len_h = int.from_bytes(res_h.content[1:5], 'big')
                     out_h = Response()
-                    out_h.ParseFromString(res_h.content[5:5+int.from_bytes(res_h.content[1:5], 'big')])
+                    out_h.ParseFromString(res_h.content[5:5+msg_len_h])
                     rt_h = out_h.WhichOneof('response')
                     if rt_h:
                         dev_data['history'] = MessageToDict(getattr(out_h, rt_h), preserving_proto_field_name=True)
@@ -162,4 +218,5 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data[DATA_WIFI_CLIENTS] = all_clients
         raw_bytes = sum(float(c.get('rx_stats', {}).get('bytes', 0)) for c in all_clients)
         data[DATA_USAGE] = {'total_gb': round(raw_bytes / (1024**3), 3)}
+        
         return data

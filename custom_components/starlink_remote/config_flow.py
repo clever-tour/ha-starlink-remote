@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging
+import logging, os
 from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
@@ -14,8 +14,13 @@ class StarlinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors = {}
         if user_input is not None:
-            # We just save the cookie and create the entry.
-            # Hardware discovery will happen in the coordinator.
+            # Ensure the storage directory exists when the user enters the data
+            persist_dir = self.hass.config.path('.storage', 'starlink-remote-cookie-storage')
+            try:
+                await self.hass.async_add_executor_job(os.makedirs, persist_dir, 0o755, True)
+            except Exception as e:
+                _LOGGER.error("Failed to create storage directory %s: %s", persist_dir, e)
+
             return self.async_create_entry(
                 title="Starlink Remote",
                 data={CONF_COOKIE: user_input[CONF_COOKIE]}
