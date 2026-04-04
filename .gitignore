@@ -1,36 +1,11 @@
-# Sensitive session and configuration data
-cookie.txt
-custom_components/starlink_remote/cookie.txt
-core.config_entries.json
-.starlink_cookies/
-starlink-remote-cookie-storage/
-
-# Diagnostic session folders
-.api2_discovery_session/
-.debug_session/
-.discovery_session/
-.final_auth_session/
-.final_debug_session/
-.final_test_session/
-.golden_auth_session/
-.id_discovery_session/
-.list_devices_session/
-.seeded_session/
-.pytest_cache/
-
-# Data dumps and temporary files
-*.json
-!manifest.json
-!hacs.json
-!strings.json
-!custom_components/starlink_remote/translations/*.json
-*.png
-*.log
-
-# Python artifacts
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# OS artifacts
+# Home Assistant
+.storage/
+*.log
+
+# OS
 .DS_Store
