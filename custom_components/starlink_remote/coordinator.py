@@ -266,3 +266,32 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data[DATA_USAGE] = {'total_gb': round(raw_bytes / (1024**3), 3)}
         
         return data
+
+    async def async_send_command(self, target_id: str, request_field: str, request_data: Any) -> bool:
+        """Send a gRPC command to a specific device."""
+        return await self.hass.async_add_executor_job(self._send_command, target_id, request_field, request_data)
+
+    def _send_command(self, target_id: str, request_field: str, request_data: Any) -> bool:
+        """Execute gRPC command (SyncWorker)."""
+        if not self._client: return False
+        from .spacex.api.device.device_pb2 import Request
+        
+        try:
+            kwargs = {request_field: request_data, "target_id": target_id}
+            req = Request(**kwargs)
+            ser = req.SerializeToString()
+            frame = b'\x00' + len(ser).to_bytes(4, 'big') + ser
+            
+            headers = {
+                "User-Agent": UA, "cookie": self._raw_cookie, "x-xsrf-token": self._xsrf_token,
+                "origin": "https://www.starlink.com", "referer": "https://www.starlink.com/account/home",
+                "content-type": "application/grpc-web+proto", "x-grpc-web": "1"
+            }
+            url = "https://www.starlink.com/api/SpaceX.API.Device.Device/Handle"
+            
+            res = self._client.post(url, headers=headers, content=frame)
+            _LOGGER.warning("[COMMAND] %s sent to %s (Status: %s)", request_field, target_id, res.status_code)
+            return res.status_code == 200
+        except Exception as e:
+            _LOGGER.error("[COMMAND] %s failed for %s: %s", request_field, target_id, e)
+            return False
