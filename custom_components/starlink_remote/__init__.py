@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 from .coordinator import StarlinkCoordinator
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = StarlinkCoordinator(hass, entry)
