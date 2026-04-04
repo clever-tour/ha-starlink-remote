@@ -1,11 +1,17 @@
 {
   "domain": "starlink_remote",
   "name": "Starlink Remote",
-  "requirements": ["httpx>=0.27.0", "protobuf>=6.32.0", "h2>=4.1.0"],
+  "codeowners": [
+    "@clever-tour"
+  ],
   "config_flow": true,
-  "iot_class": "cloud_polling",
-  "version": "1.7.0",
-  "issue_tracker": "https://github.com/clever-tour/ha-starlink-remote/issues",
   "documentation": "https://github.com/clever-tour/ha-starlink-remote",
-  "codeowners": ["@clever-tour"]
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/clever-tour/ha-starlink-remote/issues",
+  "requirements": [
+    "httpx>=0.27.0",
+    "protobuf>=6.32.0",
+    "h2>=4.1.0"
+  ],
+  "version": "1.7.0"
 }
