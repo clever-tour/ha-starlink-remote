@@ -5,7 +5,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-from .const import CONF_COOKIE, DOMAIN, CONF_COOKIE_FILE
+from .const import CONF_COOKIE, DOMAIN, CONF_COOKIE_FILE, STORAGE_DIR
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -13,8 +13,8 @@ class StarlinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
     def _save_cookie_to_disk(self, cookie: str):
-        """Mirror the cookie to the persistent storage file."""
-        persist_dir = self.hass.config.path('.storage', 'starlink-remote-cookie-storage')
+        """Mirror the cookie to the persistent storage file (portable)."""
+        persist_dir = self.hass.config.path('.storage', STORAGE_DIR)
         cookie_path = os.path.join(persist_dir, CONF_COOKIE_FILE)
         try:
             os.makedirs(persist_dir, exist_ok=True)
@@ -81,8 +81,8 @@ class StarlinkOptionsFlowHandler(config_entries.OptionsFlow):
         self.config_entry = config_entry
 
     def _save_cookie_to_disk(self, cookie: str):
-        """Mirror the cookie to the persistent storage file."""
-        persist_dir = self.hass.config.path('.storage', 'starlink-remote-cookie-storage')
+        """Mirror the cookie to the persistent storage file (portable)."""
+        persist_dir = self.hass.config.path('.storage', STORAGE_DIR)
         cookie_path = os.path.join(persist_dir, CONF_COOKIE_FILE)
         try:
             os.makedirs(persist_dir, exist_ok=True)
@@ -94,11 +94,9 @@ class StarlinkOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
-            # Update the main config entry data as well
             new_data = {**self.config_entry.data, CONF_COOKIE: user_input[CONF_COOKIE]}
             self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
             
-            # Mirror to disk
             await self.hass.async_add_executor_job(
                 self._save_cookie_to_disk, user_input[CONF_COOKIE]
             )
