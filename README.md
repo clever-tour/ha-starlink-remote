@@ -50,6 +50,7 @@ This integration requires a browser session cookie to communicate with the Starl
 5. Copy the **entire string** and paste it into the Home Assistant configuration flow.
 
 TIP1: Use an internet browser other then your preferred internet browser because the cookie will get obsoleted after you login to starlink.com with the same internet browser a second time (you can log off in the internet browser).
+
 TIP2: If you do obsolete the cookie, just remove the integration and add it again, your homeassistant history data will persist.
 
 ## Credits & Acknowledgments
