@@ -18,6 +18,8 @@ A Home Assistant integration for remote monitoring and control of Starlink hardw
 - **WiFi Insights**: Monitor connected client counts and hardware status.
 - **Remote Control**: Support for **Reboot**, **Stow**, and **Unstow** commands directly from Home Assistant.
 - **Robust Auth**: Handles session persistence and persistent cookie recovery.
+<img width="264" height="693" alt="image" src="https://github.com/user-attachments/assets/8e9076da-c3b0-4f8e-8161-05a2d3fcfca3" />
+<img width="265" height="268" alt="image" src="https://github.com/user-attachments/assets/e7f6ad29-4bd7-4018-bf43-f7f2b730d15f" />
 
 ## Installation
 
