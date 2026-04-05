@@ -1,6 +1,6 @@
 # Starlink Remote for Home Assistant
 
-A Home Assistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud consumer API.
+A Homessistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud consumer API.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HACS Action](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml)
