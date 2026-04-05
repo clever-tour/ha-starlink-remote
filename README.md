@@ -48,6 +48,8 @@ This integration requires a browser session cookie to communicate with the Starl
 3. Refresh the page.
 4. Click on any request to `www.starlink.com` and find the `cookie:` header in the **Request Headers** section.
 5. Copy the **entire string** and paste it into the Home Assistant configuration flow.
+TIP1: Use an internet browser other then your preferred internet browser because the cookie will get obsoleted after you login to starlink.com with the same internet browser a second time (you can log off in the internet browser).
+TIP2: If you do obsolete the cookie, just remove the integration and add it again, your homeassistant history data will persist.
 
 ## Credits & Acknowledgments
 Special thanks to **Eitol** for the excellent work on the [starlink-client](https://pypi.org/project/starlink-client/) library, which provided the foundational code examples and gRPC logic used to build this integration.
