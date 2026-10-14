@@ -24,7 +24,12 @@ from .session import account_number_from_cookie
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.EVENT,
+    Platform.BUTTON,
+]
 
 #: Config entry version written by this integration (see async_migrate_entry).
 ENTRY_VERSION = 3

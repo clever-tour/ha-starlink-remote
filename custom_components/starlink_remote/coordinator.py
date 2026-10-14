@@ -128,6 +128,21 @@ def _payload_shape(node: Any, prefix: str = "") -> list[str]:
     return entries
 
 
+def _device_state(status: dict[str, Any]) -> str:
+    """Return the state of a device, as far as the API reports one.
+
+    This surface has no CONNECTED/SEARCHING enum: the dish answers with a
+    disablement code (``OKAY`` when nothing disables it) and the router's own
+    ``state`` field is unset on api_version 129. A code other than OKAY is the
+    signal worth surfacing - BOOTING, STOWED, THERMAL_SHUTDOWN and so on - and
+    is reported verbatim rather than flattened into CONNECTED.
+    """
+    code = status.get("disablement_code") or status.get("state")
+    if isinstance(code, str) and code and code.upper() != "OKAY":
+        return code
+    return "CONNECTED"
+
+
 def _as_number(value: Any) -> float | None:
     """Return ``value`` as a float when it is (or looks like) a number.
 
@@ -713,7 +728,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             getattr(message, response_type), preserving_proto_field_name=True
                         )
                         device_data["status"] = raw
-                        device_data["status"]["state"] = "CONNECTED"
+                        device_data["status"]["state"] = _device_state(raw)
                         _LOGGER.debug(
                             "Status response for %s: type=%s keys=%s",
                             target_id,
@@ -780,6 +795,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 record = self._match_telemetry_id(target_id, telemetry)
                 if record is None:
                     continue
+                alerts = record.get("ActiveAlerts")
+                if alerts:
+                    device_data["alerts"] = alerts
                 device_data[DATA_WIFI_CLIENTS] = {
                     "count": _as_count(record.get("Clients")),
                     "count_2ghz": _as_count(record.get("Clients2Ghz")),

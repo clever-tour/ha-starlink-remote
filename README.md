@@ -106,8 +106,35 @@ reports success.
 | Data usage (total), WiFi client counts | Dish, Router | Diagnostic |
 | Connected | Router | - |
 | Reboot / Stow / Unstow | Dish; Reboot also on the router | - |
+| Events | Dish, Router | - |
 
 Sensors are grouped under the dish and router devices that were discovered on the account, so they can be assigned to an area like any other device.
+
+### Events
+
+The **Events** entity fires on every difference the poll can see between two
+updates, so dish and Wi-Fi history reaches the logbook and can drive
+automations. It reports `rebooted` (the dish's boot count went up, or uptime
+dropped), `state_changed`, `searching` and `obstructed` (the causes the dish
+logs for its own outages), `outage` (any other cause), `alert` (a thermal,
+hardware or account flag, from the dish's own alert map or the account
+telemetry), `update_state_changed` (a software update transition - the router
+reports its failures here) and `clients_changed` (Wi-Fi clients joining or
+leaving). Each event carries its detail as attributes: the cause and duration
+of an outage, the alert name, the from/to of a transition.
+
+### What the API does and does not say
+
+**State** reports what the API actually answers. The dish does not return a
+`CONNECTED`/`SEARCHING` enum on the current API version: it returns a
+disablement code, which is reported verbatim when it is not `OKAY` (`BOOTING`,
+`STOWED`, `THERMAL_SHUTDOWN`, ...) and `CONNECTED` otherwise. The router's own
+state field is likewise unset, so its **State** reflects the device answering.
+
+**Uptime** is shown in hours, with the raw value in seconds kept as an
+attribute. It carries no duration device class on purpose: Home Assistant
+converts a duration into the unit system's unit, which is seconds in a metric
+setup, so the reading would be shown in seconds whatever unit were declared.
 
 ## Troubleshooting
 

@@ -54,6 +54,31 @@ class StarlinkSensorEntityDescription(SensorEntityDescription):
 
 
 
+def _uptime_seconds(device: dict[str, Any]) -> float | None:
+    """Return the uptime exactly as the API reports it.
+
+    The value stays in the API's own unit (seconds) so the recorder keeps one
+    continuous series; the sensor suggests hours for the display.
+    """
+    value = (device.get("status", {}).get("device_state", {}) or {}).get("uptime_s")
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _uptime_hours(device: dict[str, Any]) -> float | None:
+    """Return the uptime in hours, the unit this entity is declared in."""
+    seconds = _uptime_seconds(device)
+    return round(seconds / 3600, 2) if seconds is not None else None
+
+
+def _uptime_attributes(device: dict[str, Any]) -> dict[str, Any]:
+    """Return the uptime in seconds, the raw API value."""
+    seconds = (device.get("status", {}).get("device_state", {}) or {}).get("uptime_s")
+    return {"uptime_seconds": seconds}
+
+
 def _wifi_client_count(device: dict[str, Any]) -> StateType:
     """Return the number of clients on a router.
 
@@ -117,13 +142,15 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
     StarlinkSensorEntityDescription(
         key="uptime",
         translation_key="uptime",
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        device_class=SensorDeviceClass.DURATION,
+        # Deliberately no SensorDeviceClass.DURATION: Home Assistant converts a
+        # duration into the unit system's unit, which is seconds in metric, so
+        # the reading would show seconds whatever unit were declared. A plain
+        # hour unit shows the reading in the unit the dish is read in.
+        native_unit_of_measurement=UnitOfTime.HOURS,
         state_class=SensorStateClass.TOTAL_INCREASING,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.get("status", {})
-        .get("device_state", {})
-        .get("uptime_s"),
+        value_fn=_uptime_hours,
+        attr_fn=_uptime_attributes,
         dev_types=("dish", "router"),
     ),
     # Dish only.
