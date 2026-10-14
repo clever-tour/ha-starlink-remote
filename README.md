@@ -1,6 +1,6 @@
 # Starlink Remote for Home Assistant
 
-A Homessistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud consumer API.
+A Home Assistant integration for remote monitoring and control of Starlink hardware via the official SpaceX cloud consumer API.
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![HACS Action](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml/badge.svg)](https://github.com/clever-tour/ha-starlink-remote/actions/workflows/hacs.yml)
@@ -60,6 +60,10 @@ Special thanks to **Eitol** for the excellent work on the [starlink-client](http
 For help, bug reports, or feedback:
 - **GitHub Issues**: [Open an issue](https://github.com/clever-tour/ha-starlink-remote/issues)
 - **Signal Group**: [Join our community](https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT)
+
+## License
+
+This integration is released under the [MIT License](LICENSE).
 
 ---
 *Created with gemini-cli.*
