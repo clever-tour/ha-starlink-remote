@@ -1,6 +1,6 @@
 """On-disk session state for the Starlink Remote integration.
 
-Everything the integration keeps between restarts lives in one directory,
+Everything the integration keeps between restarts lives below one directory,
 ``<config>/.storage/<STORAGE_DIR>``, and falls into exactly two categories:
 
 * **Session material** - the starlink.com browser cookie harvested by the
@@ -13,8 +13,14 @@ Everything the integration keeps between restarts lives in one directory,
   dish/router, so the entities keep their identity and their recorded history
   instead of being recreated from scratch.
 
+Both live in a **per config entry directory** (``<STORAGE_DIR>/<entry_id>``),
+so several entries - several Starlink accounts, or the same account added
+twice - keep their own cookie and their own discovery history instead of
+overwriting each other's. Entries created before that layout (version 2) are
+moved into their directory by :func:`migrate_legacy_files`.
+
 Every other module talks to the files through this module, so the file names,
-the permission bits and the purge policy are defined in a single place.
+the permission bits, the layout and the purge policy are defined in one place.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ import os
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_COOKIE_FILE, STORAGE_DIR
+from .session import account_number_from_cookie
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -47,23 +54,28 @@ def storage_dir(hass: HomeAssistant) -> str:
     return hass.config.path(".storage", STORAGE_DIR)
 
 
-def cookie_path(hass: HomeAssistant) -> str:
+def entry_dir(hass: HomeAssistant, entry_id: str) -> str:
+    """Return the directory that holds the state of one config entry."""
+    return os.path.join(storage_dir(hass), entry_id)
+
+
+def cookie_path(hass: HomeAssistant, entry_id: str) -> str:
     """Return the path of the persisted starlink.com session cookie."""
-    return os.path.join(storage_dir(hass), CONF_COOKIE_FILE)
+    return os.path.join(entry_dir(hass, entry_id), CONF_COOKIE_FILE)
 
 
-def history_path(hass: HomeAssistant) -> str:
+def history_path(hass: HomeAssistant, entry_id: str) -> str:
     """Return the path of the persisted hardware-discovery metrics."""
-    return os.path.join(storage_dir(hass), HISTORY_FILE)
+    return os.path.join(entry_dir(hass, entry_id), HISTORY_FILE)
 
 
-def save_cookie(hass: HomeAssistant, cookie: str) -> None:
+def save_cookie(hass: HomeAssistant, entry_id: str, cookie: str) -> None:
     """Persist the session cookie, readable by the owner only (SyncWorker).
 
     An empty cookie removes the file: writing a zero-length credential would
     only leave a file that pretends a session exists.
     """
-    path = cookie_path(hass)
+    path = cookie_path(hass, entry_id)
     if not cookie:
         try:
             os.remove(path)
@@ -87,10 +99,10 @@ def save_cookie(hass: HomeAssistant, cookie: str) -> None:
         _LOGGER.debug("Session cookie stored in %s", path)
 
 
-def load_cookie(hass: HomeAssistant) -> str:
+def load_cookie(hass: HomeAssistant, entry_id: str) -> str:
     """Return the persisted session cookie, or an empty string when absent."""
     try:
-        with open(cookie_path(hass), encoding="utf-8") as handle:
+        with open(cookie_path(hass, entry_id), encoding="utf-8") as handle:
             return handle.read().strip()
     except FileNotFoundError:
         return ""
@@ -99,10 +111,10 @@ def load_cookie(hass: HomeAssistant) -> str:
         return ""
 
 
-def load_discovered_ids(hass: HomeAssistant) -> set[str]:
+def load_discovered_ids(hass: HomeAssistant, entry_id: str) -> set[str]:
     """Return the hardware ids discovered on previous runs (empty when none)."""
     try:
-        with open(history_path(hass), encoding="utf-8") as handle:
+        with open(history_path(hass, entry_id), encoding="utf-8") as handle:
             history = json_load(handle.read())
     except FileNotFoundError:
         return set()
@@ -117,9 +129,9 @@ def load_discovered_ids(hass: HomeAssistant) -> set[str]:
     return {str(target_id) for target_id in discovered}
 
 
-def save_discovered_ids(hass: HomeAssistant, ids: set[str]) -> None:
+def save_discovered_ids(hass: HomeAssistant, entry_id: str, ids: set[str]) -> None:
     """Persist the discovered hardware ids (SyncWorker)."""
-    path = history_path(hass)
+    path = history_path(hass, entry_id)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
@@ -128,16 +140,18 @@ def save_discovered_ids(hass: HomeAssistant, ids: set[str]) -> None:
         _LOGGER.error("Failed to store the hardware history: %s", err)
 
 
-def purge_session_data(hass: HomeAssistant) -> list[str]:
-    """Delete every stored credential, keeping the historic metrics.
+def purge_session_data(hass: HomeAssistant, entry_id: str) -> list[str]:
+    """Delete the stored credential of one entry, keeping its metrics.
 
     Called when the config entry is removed: the user asked for the
     starlink.com key material to disappear with the integration, while the
-    non-sensitive discovery history stays behind. Returns the paths removed.
+    non-sensitive discovery history stays behind. Only the directory of
+    ``entry_id`` is touched, so removing one account cannot log out another.
+    Returns the paths removed.
     """
-    directory = storage_dir(hass)
+    directory = entry_dir(hass, entry_id)
     try:
-        entries = os.listdir(directory)
+        names = os.listdir(directory)
     except FileNotFoundError:
         return []
     except OSError as err:
@@ -145,7 +159,7 @@ def purge_session_data(hass: HomeAssistant) -> list[str]:
         return []
 
     removed: list[str] = []
-    for name in entries:
+    for name in names:
         path = os.path.join(directory, name)
         if name in _KEEP_ON_PURGE:
             continue
@@ -167,6 +181,84 @@ def purge_session_data(hass: HomeAssistant) -> list[str]:
         pass
 
     return removed
+
+
+def migrate_legacy_files(
+    hass: HomeAssistant, entry_id: str, account: str | None, sole_entry: bool
+) -> list[str]:
+    """Move pre-version-3 flat storage into the entry's own directory.
+
+    Version 2 kept exactly one cookie and one history file for every entry,
+    directly below ``<STORAGE_DIR>``. The files therefore cannot simply be
+    handed to the first entry that migrates: with two accounts the cookie in
+    the flat layout belongs to the account it names. It is matched through the
+    account number in the cookie; when the cookie carries none, it is only
+    claimed by an entry that is the sole entry for the domain. A history file
+    is only moved together with a claimed cookie, so no account inherits the
+    hardware ids of another. Returns the paths moved.
+    """
+    legacy = storage_dir(hass)
+    cookie_src = os.path.join(legacy, CONF_COOKIE_FILE)
+    history_src = os.path.join(legacy, HISTORY_FILE)
+    cookie_dst = cookie_path(hass, entry_id)
+    history_dst = history_path(hass, entry_id)
+
+    if not os.path.isfile(cookie_src) and not os.path.isfile(history_src):
+        return []
+
+    raw = ""
+    if os.path.isfile(cookie_src):
+        try:
+            with open(cookie_src, encoding="utf-8") as handle:
+                raw = handle.read().strip()
+        except OSError as err:
+            _LOGGER.error("Failed to read the legacy cookie file: %s", err)
+            return []
+
+    if raw:
+        legacy_account = account_number_from_cookie(raw)
+        if legacy_account and account and legacy_account != account:
+            _LOGGER.debug(
+                "Legacy cookie belongs to another account, leaving it for its "
+                "own entry to migrate"
+            )
+            return []
+        if legacy_account is None and not sole_entry:
+            _LOGGER.warning(
+                "The legacy cookie file names no account and several Starlink "
+                "Remote entries exist; keeping it out of the way instead of "
+                "guessing which entry owns it"
+            )
+            return []
+
+    moved: list[str] = []
+    for source, destination in (
+        (cookie_src, cookie_dst),
+        (history_src, history_dst),
+    ):
+        if not os.path.isfile(source) or os.path.exists(destination):
+            continue
+        try:
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            os.replace(source, destination)
+        except OSError as err:
+            _LOGGER.error("Failed to move %s into %s: %s", source, destination, err)
+            continue
+        moved.append(destination)
+
+    if moved:
+        _LOGGER.info(
+            "Moved %d stored file(s) of the single-entry layout into the "
+            "directory of entry %s",
+            len(moved),
+            entry_id,
+        )
+    # Tidy the flat directory away when nothing is left in it.
+    try:
+        os.rmdir(legacy)
+    except OSError:
+        pass
+    return moved
 
 
 def json_dump(payload: dict[str, object]) -> str:

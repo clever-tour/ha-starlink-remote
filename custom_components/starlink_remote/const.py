@@ -2,6 +2,9 @@
 
 DOMAIN = "starlink_remote"
 
+#: Name of the integration, also used as the base of every config entry title.
+DEFAULT_TITLE = "Starlink Remote"
+
 # --- Config entry / options keys -------------------------------------------------
 CONF_COOKIE = "cookie"
 CONF_NAME = "name"

@@ -43,7 +43,6 @@
       }
     },
     "abort": {
-      "already_configured": "This Starlink account is already set up.",
       "reauth_successful": "Authentication refreshed successfully."
     },
     "error": {
@@ -54,6 +53,16 @@
   },
   "options": {
     "step": {
+      "user": {
+        "title": "Starlink Remote",
+        "description": "Paste a new browser cookie for this account, or leave the field empty to keep the stored session.\n\n{guide}\n\n{log}",
+        "data": {
+          "cookie": "New Browser Cookie String (optional)"
+        },
+        "data_description": {
+          "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
+        }
+      },
       "init": {
         "title": "Starlink Remote",
         "description": "Paste a new browser cookie for this account, or leave the field empty to keep the stored session.\n\n{guide}\n\n{log}",
@@ -89,17 +98,46 @@
   },
   "issues": {
     "session_expired": {
-      "title": "Starlink session expired",
+      "title": "Starlink session expired ({account})",
       "fix_flow": {
         "step": {
           "init": {
             "title": "Renew the Starlink session",
-            "description": "The account API has been rejecting the stored cookie for a while, so no telemetry is being polled. Sign in to starlink.com, copy the request cookie from your browser and paste it here. The cookie is checked against the account API and only stored when the API accepts it.",
+            "description": "The account API has been rejecting the stored cookie of **{account}** for a while, so no telemetry is being polled. Sign in to starlink.com, copy the request cookie from your browser and paste it here. The cookie is checked against the account API and only stored when the API accepts it.",
             "data": {
               "cookie": "Fresh Browser Cookie String"
+            },
+            "data_description": {
+              "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
             }
+          },
+          "user": {
+            "title": "Renew the Starlink session",
+            "description": "The account API has been rejecting the stored cookie of **{account}** for a while, so no telemetry is being polled. Sign in to starlink.com, copy the request cookie from your browser and paste it here. The cookie is checked against the account API and only stored when the API accepts it.",
+            "data": {
+              "cookie": "Fresh Browser Cookie String"
+            },
+            "data_description": {
+              "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
+            }
+          },
+          "connect": {
+            "title": "Reconnecting to Starlink",
+            "description": "{log}",
+            "progress": {
+              "parse": "Reading the cookie\u2026",
+              "portal": "Priming the portal session\u2026",
+              "account": "Asking the Starlink account API\u2026",
+              "lines": "Reading your service lines\u2026",
+              "discover": "Discovering your hardware\u2026",
+              "reload": "Reloading the integration and polling\u2026"
+            }
+          },
+          "confirm": {
+            "title": "Session renewed",
+            "description": "{log}"
           }
-        },
+          },
         "error": {
           "invalid_auth": "Authentication failed. Check your cookie.",
           "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",

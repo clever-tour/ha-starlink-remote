@@ -20,10 +20,9 @@ import httpx
 from google.protobuf.json_format import MessageToDict
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from . import session, storage
+from . import notify, session, storage
 from .const import (
     CONF_COOKIE,
     CONF_COOKIE_FILE,
@@ -33,7 +32,6 @@ from .const import (
     DATA_WIFI_CLIENTS,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    ISSUE_SESSION_EXPIRED,
     STARLINK_API_URL,
     STARLINK_AUTH_URL,
     STARLINK_WEB_SERVICE_LINES,
@@ -143,9 +141,14 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._service_lines: Any = None
         self._service_lines_read_at: float = 0.0
 
-        # Error tracking for 401 persistent notifications
+        # Error tracking: how long the account API has been rejecting the
+        # session, and whether that was already reported to the user.
         self._auth_failure_start: float | None = None
+        self._auth_failure_detail = ""
         self._notification_sent = False
+        # Alerts left behind by an earlier process are cleared on the first
+        # successful session check (see _handle_auth_success).
+        self._alerts_cleared = False
 
         self._client: httpx.Client | None = None
 
@@ -157,6 +160,16 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 seconds=entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
             ),
         )
+
+    @property
+    def entry_id(self) -> str:
+        """Return the id of the config entry this coordinator belongs to.
+
+        Every per-entry identity (entity unique ids, device identifiers, the
+        stored cookie, the repair issue and the notification) is derived from
+        it, so two entries never share one account's state.
+        """
+        return self._entry.entry_id
 
     @property
     def _session_headers(self) -> dict[str, str]:
@@ -199,7 +212,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Cookie precedence: the mirrored storage file (kept fresh by the
         # session prime), then a file next to the component for local
         # development, then the value stored in the config entry.
-        persisted_cookie = storage.load_cookie(self.hass)
+        persisted_cookie = storage.load_cookie(self.hass, self.entry_id)
         self._raw_cookie = persisted_cookie
         # Already on disk: do not rewrite it on the next save.
         self._saved_cookie = persisted_cookie
@@ -232,7 +245,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _load_persistent_data(self) -> None:
         """Restore the hardware ids discovered on earlier runs (SyncWorker)."""
-        self.discovered_ids |= storage.load_discovered_ids(self.hass)
+        self.discovered_ids |= storage.load_discovered_ids(self.hass, self.entry_id)
         self._saved_ids = set(self.discovered_ids)
 
     def _save_persistent_data(self) -> None:
@@ -240,11 +253,11 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Both writes are guarded by a change check: the previous version
         # rewrote the files on every poll, i.e. once a minute.
         if self.discovered_ids != self._saved_ids:
-            storage.save_discovered_ids(self.hass, self.discovered_ids)
+            storage.save_discovered_ids(self.hass, self.entry_id, self.discovered_ids)
             self._saved_ids = set(self.discovered_ids)
 
         if self._raw_cookie and self._raw_cookie != self._saved_cookie:
-            storage.save_cookie(self.hass, self._raw_cookie)
+            storage.save_cookie(self.hass, self.entry_id, self._raw_cookie)
             self._saved_cookie = self._raw_cookie
 
     def _refresh_session(self) -> bool:
@@ -259,7 +272,11 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             response_auth = self._client.get(STARLINK_AUTH_URL, headers=headers)
 
             if {response_home.status_code, response_auth.status_code} & {401, 403}:
-                self._handle_auth_failure()
+                self._handle_auth_failure(
+                    f"The account API answered HTTP {response_home.status_code} "
+                    f"for the session probe and HTTP {response_auth.status_code} "
+                    f"for the auth check."
+                )
                 return False
 
             # Diagnostic: a 200 alone does not prove the session is valid, the
@@ -296,11 +313,12 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Session refresh failed: %s", err, exc_info=True)
             return False
 
-    def _handle_auth_failure(self) -> None:
-        """Track consecutive auth failures and notify the user past the grace period."""
+    def _handle_auth_failure(self, detail: str = "") -> None:
+        """Track consecutive auth failures and alert the user past the grace period."""
         now = time.time()
         if self._auth_failure_start is None:
             self._auth_failure_start = now
+            self._auth_failure_detail = detail
 
         if self._notification_sent:
             return
@@ -308,38 +326,36 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         _LOGGER.warning(
-            "Starlink session invalid for over %s seconds, notifying the user",
+            "Starlink session invalid for over %s seconds, alerting the user",
             _AUTH_FAILURE_GRACE,
         )
         self._notification_sent = True
-        # This runs in a SyncWorker thread, so the repair issue has to be handed
-        # to the event loop through add_job().
-        self.hass.add_job(self._async_notify_auth_failure)
-
-    async def _async_notify_auth_failure(self) -> None:
-        """Raise the repair issue that carries the cookie fix flow (event loop)."""
-        ir.async_create_issue(
+        # This runs in a SyncWorker thread, so the alerts have to be handed to
+        # the event loop through add_job(). Both the repair issue and the
+        # notification belong to this entry only.
+        self.hass.add_job(
+            notify.async_raise_session_alerts,
             self.hass,
-            DOMAIN,
-            ISSUE_SESSION_EXPIRED,
-            is_fixable=True,
-            is_persistent=True,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key=ISSUE_SESSION_EXPIRED,
-            data={"entry_id": self._entry.entry_id},
+            self._entry,
+            self._auth_failure_detail,
         )
 
     def _handle_auth_success(self) -> None:
-        """Reset the auth failure tracking and drop a stale repair issue."""
-        if self._auth_failure_start is None:
+        """Forget the failure window and drop the alerts of this entry."""
+        self._auth_failure_start = None
+        self._auth_failure_detail = ""
+        if not (self._notification_sent or not self._alerts_cleared):
             return
 
-        self._auth_failure_start = None
-        if self._notification_sent:
-            self._notification_sent = False
-            self.hass.add_job(
-                ir.async_delete_issue, self.hass, DOMAIN, ISSUE_SESSION_EXPIRED
-            )
+        # Two cases: the session recovered after an alert was raised, or the
+        # first check after a restart found a leftover alert from the previous
+        # process (Home Assistant or the entry was reloaded while the cookie
+        # was already broken).
+        self._notification_sent = False
+        self._alerts_cleared = True
+        self.hass.add_job(
+            notify.async_clear_session_alerts, self.hass, self._entry
+        )
 
     def _fetch_service_lines(self, *, force: bool = False) -> None:
         """Fetch and cache the webagg service-lines payload (SyncWorker).

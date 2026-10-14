@@ -31,7 +31,7 @@ from homeassistant.helpers.selector import (
 )
 
 from . import storage
-from .const import CONF_COOKIE, DOMAIN
+from .const import CONF_COOKIE, DEFAULT_TITLE, DOMAIN
 from .flow_log import CookieProbe, PhaseResult
 from .session import account_number_from_cookie
 from .validation import ERROR_CANNOT_CONNECT, ERROR_INVALID_AUTH
@@ -61,7 +61,7 @@ _COOKIE_HELP = (
 )
 
 
-def _looks_like_cookie(raw: str) -> bool:
+def looks_like_cookie(raw: str) -> bool:
     """Return True when the input can be a browser cookie string.
 
     A deliberate cheap check, run before the credential is sent anywhere: it
@@ -81,7 +81,7 @@ def _update_is_live(hass: HomeAssistant, entry_id: str) -> bool:
     return coordinator is not None and coordinator.last_update_success
 
 
-class _CookieConnectFlow(FlowHandler):
+class CookieConnectFlow(FlowHandler):
     """Mix-in: run a :class:`CookieProbe` as a sequence of progress steps.
 
     The flow manager re-invokes ``async_step_connect`` every time the progress
@@ -108,11 +108,19 @@ class _CookieConnectFlow(FlowHandler):
     # -- the cookie form ---------------------------------------------------
 
     def _async_cookie_form(
-        self, *, errors: dict[str, str] | None = None
+        self,
+        *,
+        step_id: str | None = None,
+        errors: dict[str, str] | None = None,
     ) -> FlowResult:
-        """Show the cookie form, with the log of a previous attempt when there is one."""
+        """Show the cookie form, with the log of a previous attempt when there is one.
+
+        ``step_id`` defaults to the step that asked for the cookie, so the
+        translation the frontend renders always matches the step the user is
+        on - the failure path re-renders the same form.
+        """
         return self.async_show_form(
-            step_id=self._connect_entry_step,
+            step_id=step_id or self._connect_entry_step,
             data_schema=self._cookie_schema,
             errors=errors,
             description_placeholders={"guide": _COOKIE_HELP, "log": self._log()},
@@ -155,7 +163,9 @@ class _CookieConnectFlow(FlowHandler):
         """
         probe = self._probe
         if probe is None:  # pragma: no cover - defensive, cannot happen
-            return self.async_abort(reason="already_configured")
+            # Nothing to drive the phases with: show the cookie form again
+            # rather than leaving the dialog on an empty progress step.
+            return self._async_cookie_form()
 
         if self._connect_done_result is not None:
             return self._connect_done_result
@@ -163,7 +173,7 @@ class _CookieConnectFlow(FlowHandler):
         if (
             self._phase_task is not None
             and not self._phase_task.done()
-            and (running := probe.phase_result(self._phase_task_phase)) is None
+            and probe.phase_result(self._phase_task_phase) is None
         ):
             return self.async_show_progress(
                 step_id="connect",
@@ -269,20 +279,23 @@ class _CookieConnectFlow(FlowHandler):
         return probe.render(title=self._connect_log_title, footer=footer)
 
 
-class StarlinkConfigFlow(_CookieConnectFlow, config_entries.ConfigFlow, domain=DOMAIN):
+class StarlinkConfigFlow(CookieConnectFlow, config_entries.ConfigFlow, domain=DOMAIN):
     """Handle the initial configuration and re-authentication."""
 
-    #: Version 2 adds the account number as the entry unique id. Entries created
-    #: before that are migrated in async_migrate_entry().
-    VERSION = 2
+    #: Version 2 added the account number as the entry unique id; version 3
+    #: moved the stored session files and the entity/device identity of every
+    #: entry under its own entry id, so several entries can coexist. Entries
+    #: created before that are migrated in async_migrate_entry().
+    VERSION = 3
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle initial configuration."""
+        self._connect_entry_step = "user"
         if user_input is not None:
             cookie = user_input[CONF_COOKIE].strip()
-            if not _looks_like_cookie(cookie):
+            if not looks_like_cookie(cookie):
                 return self._async_cookie_form(errors={"base": ERROR_INVALID_AUTH})
             return self._async_start_connect(
                 cookie,
@@ -310,16 +323,27 @@ class StarlinkConfigFlow(_CookieConnectFlow, config_entries.ConfigFlow, domain=D
             )
 
         cookie = self._connect_cookie
-        await async_mirror_cookie(self.hass, cookie)
 
-        # One entry per Starlink account: the account number is part of the
-        # cookie, so a second attempt for the same account is a duplicate rather
-        # than a second integration.
-        if account := account_number_from_cookie(cookie):
+        # The integration may be added more than once - several accounts, or
+        # the same account twice - so the account number is still recorded as
+        # the unique id but no longer blocks a second entry. The title carries
+        # the account tail, because that is what the user sees in the entry
+        # list, in the repair issue and in the session-expired notification.
+        account = account_number_from_cookie(cookie)
+        if account:
             await self.async_set_unique_id(account)
-            self._abort_if_unique_id_configured()
+            if any(
+                existing.unique_id == account
+                for existing in self.hass.config_entries.async_entries(DOMAIN)
+            ):
+                _LOGGER.info(
+                    "Adding another entry for the Starlink account ending in %s",
+                    account[-8:],
+                )
 
-        return self.async_create_entry(title="Starlink Remote", data={CONF_COOKIE: cookie})
+        return self.async_create_entry(
+            title=entry_title(self.hass, account), data={CONF_COOKIE: cookie}
+        )
 
     async def async_step_reauth(
         self, user_input: dict[str, Any] | None = None
@@ -331,9 +355,11 @@ class StarlinkConfigFlow(_CookieConnectFlow, config_entries.ConfigFlow, domain=D
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ask for a fresh cookie and test it with the connection log."""
+        # Keep the form's step id (and the failed-attempt form) on this step.
+        self._connect_entry_step = "reauth_confirm"
         if user_input is not None:
             cookie = user_input[CONF_COOKIE].strip()
-            if not _looks_like_cookie(cookie):
+            if not looks_like_cookie(cookie):
                 return self._async_cookie_form(errors={"base": ERROR_INVALID_AUTH})
             return self._async_start_connect(
                 cookie,
@@ -356,7 +382,7 @@ class StarlinkConfigFlow(_CookieConnectFlow, config_entries.ConfigFlow, domain=D
         """Store the cookie, reload the entry and check the first poll."""
         probe = self._probe
         assert probe is not None
-        await _async_store_and_reload(
+        await async_store_and_reload(
             self.hass, self._get_reauth_entry(), self._connect_cookie, probe
         )
         self.async_update_progress(len(probe.results) / len(probe.phases))
@@ -406,15 +432,23 @@ class StarlinkConfigFlow(_CookieConnectFlow, config_entries.ConfigFlow, domain=D
         return StarlinkOptionsFlowHandler()
 
 
-class StarlinkOptionsFlowHandler(_CookieConnectFlow, config_entries.OptionsFlow):
-    """Handle the options flow: replacing an expired cookie."""
+class StarlinkOptionsFlowHandler(CookieConnectFlow, config_entries.OptionsFlow):
+    """Handle the options flow: replacing an expired cookie.
+
+    Home Assistant enters an options flow on the ``user`` step (cores from
+    2026.x on; earlier cores used ``init``). Only ``init`` used to exist here, so
+    the gear icon failed with "Handler StarlinkOptionsFlowHandler doesn't support
+    step user" before the dialog could even render. Both names point at the same
+    coroutine, so either core gets the cookie form.
+    """
 
     _cookie_schema = OPTIONS_SCHEMA
 
-    async def async_step_init(
+    async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Ask for a cookie, or keep the stored one when the field is empty."""
+        self._connect_entry_step = "user"
         if user_input is not None:
             cookie = (user_input.get(CONF_COOKIE) or "").strip()
             if not cookie:
@@ -422,16 +456,19 @@ class StarlinkOptionsFlowHandler(_CookieConnectFlow, config_entries.OptionsFlow)
                 _LOGGER.debug("Options submitted without a new cookie, keeping it")
                 return self.async_create_entry(title="", data={})
 
-            if not _looks_like_cookie(cookie):
+            if not looks_like_cookie(cookie):
                 return self._async_cookie_form(errors={"base": ERROR_INVALID_AUTH})
             return self._async_start_connect(
                 cookie,
-                entry_step="init",
+                entry_step="user",
                 progress_title="Testing the new cookie",
                 log_title="Starlink connection check",
             )
 
         return self._async_cookie_form()
+
+    #: Older cores open the options flow on ``init``; keep that entry point.
+    async_step_init = async_step_user
 
     def _extra_phases(self) -> tuple[str, ...]:
         """The entry is reloaded with the new cookie before the flow closes."""
@@ -441,7 +478,7 @@ class StarlinkOptionsFlowHandler(_CookieConnectFlow, config_entries.OptionsFlow)
         """Store the cookie, reload the entry and check the first poll."""
         probe = self._probe
         assert probe is not None
-        await _async_store_and_reload(
+        await async_store_and_reload(
             self.hass, self.config_entry, self._connect_cookie, probe
         )
         self.async_update_progress(len(probe.results) / len(probe.phases))
@@ -465,7 +502,7 @@ class StarlinkOptionsFlowHandler(_CookieConnectFlow, config_entries.OptionsFlow)
         )
 
 
-async def _async_store_and_reload(
+async def async_store_and_reload(
     hass: HomeAssistant,
     entry: config_entries.ConfigEntry,
     cookie: str,
@@ -520,9 +557,24 @@ async def async_store_cookie(
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_COOKIE: cookie}
     )
-    await hass.async_add_executor_job(storage.save_cookie, hass, cookie)
+    await hass.async_add_executor_job(
+        storage.save_cookie, hass, entry.entry_id, cookie
+    )
 
 
-async def async_mirror_cookie(hass: HomeAssistant, cookie: str) -> None:
-    """Mirror a cookie to the storage file for an entry that is about to be created."""
-    await hass.async_add_executor_job(storage.save_cookie, hass, cookie)
+def entry_title(hass: HomeAssistant, account: str | None) -> str:
+    """Return a unique config entry title for ``account``.
+
+    The title is shown in the entry list, in the repair issue and in the
+    session-expired notification, so it names the account the entry belongs to
+    whenever the cookie carries an account number. A second entry for the same
+    account gets a counter: adding one twice is allowed on purpose.
+    """
+    base = f"{DEFAULT_TITLE} ({account[-8:]})" if account else DEFAULT_TITLE
+    taken = {entry.title for entry in hass.config_entries.async_entries(DOMAIN)}
+    if base not in taken:
+        return base
+    index = 2
+    while f"{base} #{index}" in taken:
+        index += 1
+    return f"{base} #{index}"

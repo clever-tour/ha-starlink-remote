@@ -15,11 +15,19 @@ class StarlinkEntity(CoordinatorEntity):
     _attr_has_entity_name = True
 
     def __init__(self, coordinator, description, target_id: str) -> None:
-        """Initialize the entity."""
+        """Initialize the entity.
+
+        Both the unique id and the device identifier start with the config
+        entry id: several entries (several Starlink accounts, or the same
+        account added twice) may describe the very same dish or router, and
+        without that prefix the second entry's entities would be rejected as
+        duplicates of the first entry's instead of being created beside them.
+        """
         super().__init__(coordinator)
         self.entity_description = description
         self.target_id = target_id
-        self._attr_unique_id = f"{target_id}_{description.key}"
+        entry_id = coordinator.entry_id
+        self._attr_unique_id = f"{entry_id}_{target_id}_{description.key}"
 
         # Device identity comes from the polled hardware inventory. It is read
         # once at construction and is stable afterwards, so a device that is
@@ -32,7 +40,7 @@ class StarlinkEntity(CoordinatorEntity):
         short_serial = serial[-8:] if len(serial) > 8 else serial
 
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, target_id)},
+            identifiers={(DOMAIN, f"{entry_id}_{target_id}")},
             name=f"Starlink {dev_type} ({short_serial})",
             manufacturer="SpaceX",
             model=info.get("hardware_version") or f"Starlink {dev_type}",
