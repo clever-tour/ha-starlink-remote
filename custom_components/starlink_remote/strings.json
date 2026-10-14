@@ -1,5 +1,13 @@
 {
   "config": {
+    "progress": {
+      "parse": "Reading the cookie…",
+      "portal": "Priming the portal session…",
+      "account": "Asking the Starlink account API…",
+      "lines": "Reading your service lines…",
+      "discover": "Discovering your hardware…",
+      "reload": "Reloading the integration and polling…"
+    },
     "step": {
       "user": {
         "title": "Starlink Remote",
@@ -23,15 +31,7 @@
       },
       "connect": {
         "title": "Connecting to Starlink",
-        "description": "{log}",
-        "progress": {
-          "parse": "Reading the cookie…",
-          "portal": "Priming the portal session…",
-          "account": "Asking the Starlink account API…",
-          "lines": "Reading your service lines…",
-          "discover": "Discovering your hardware…",
-          "reload": "Reloading the integration and polling…"
-        }
+        "description": "{log}"
       },
       "confirm": {
         "title": "Connection verified",
@@ -52,6 +52,14 @@
     }
   },
   "options": {
+    "progress": {
+      "parse": "Reading the cookie…",
+      "portal": "Priming the portal session…",
+      "account": "Asking the Starlink account API…",
+      "lines": "Reading your service lines…",
+      "discover": "Discovering your hardware…",
+      "reload": "Reloading the integration and polling…"
+    },
     "step": {
       "user": {
         "title": "Starlink Remote",
@@ -75,15 +83,7 @@
       },
       "connect": {
         "title": "Connecting to Starlink",
-        "description": "{log}",
-        "progress": {
-          "parse": "Reading the cookie…",
-          "portal": "Priming the portal session…",
-          "account": "Asking the Starlink account API…",
-          "lines": "Reading your service lines…",
-          "discover": "Discovering your hardware…",
-          "reload": "Reloading the integration and polling…"
-        }
+        "description": "{log}"
       },
       "confirm": {
         "title": "Connection verified",
@@ -100,6 +100,14 @@
     "session_expired": {
       "title": "Starlink session expired ({account})",
       "fix_flow": {
+        "progress": {
+          "parse": "Reading the cookie…",
+          "portal": "Priming the portal session…",
+          "account": "Asking the Starlink account API…",
+          "lines": "Reading your service lines…",
+          "discover": "Discovering your hardware…",
+          "reload": "Reloading the integration and polling…"
+        },
         "step": {
           "init": {
             "title": "Renew the Starlink session",
@@ -123,21 +131,13 @@
           },
           "connect": {
             "title": "Reconnecting to Starlink",
-            "description": "{log}",
-            "progress": {
-              "parse": "Reading the cookie\u2026",
-              "portal": "Priming the portal session\u2026",
-              "account": "Asking the Starlink account API\u2026",
-              "lines": "Reading your service lines\u2026",
-              "discover": "Discovering your hardware\u2026",
-              "reload": "Reloading the integration and polling\u2026"
-            }
+            "description": "{log}"
           },
           "confirm": {
             "title": "Session renewed",
             "description": "{log}"
           }
-          },
+        },
         "error": {
           "invalid_auth": "Authentication failed. Check your cookie.",
           "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",
