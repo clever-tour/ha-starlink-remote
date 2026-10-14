@@ -22,6 +22,12 @@ A Home Assistant integration for remote monitoring and control of Starlink hardw
 - **Diagnostics** - one-click download (Settings > Devices & Services > Starlink Remote > Download diagnostics) with the cookie redacted.
 - **Translated entities** - entity names come from the translation files, ready for other languages.
 
+## Screenshots
+
+| Dish sensors | Router sensors |
+| :---: | :---: |
+| <img src="docs/images/sensors-dish.png" alt="Sensors exposed for the Starlink dish" width="264"> | <img src="docs/images/sensors-router.png" alt="Sensors exposed for the Starlink router" width="265"> |
+
 ## Requirements
 
 | Item | Requirement |
