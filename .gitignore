@@ -12,3 +12,6 @@ custom_components/starlink_remote/cookie.txt
 
 # OS
 .DS_Store
+
+# saved account pages must never be committed
+account_home.html
