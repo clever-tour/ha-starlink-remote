@@ -128,3 +128,7 @@ For help, bug reports or feature requests:
 
 - **GitHub Issues**: [open an issue](https://github.com/clever-tour/ha-starlink-remote/issues)
 - **Signal Group**: [join our community](https://signal.group/#CjQKIGdi3Eu4cjebMN6Lmno_8BikvfyduehDNeBGTXjvHt7SEhD9VRQGqufkCsp8Khz7xKzT)
+
+## License
+
+This integration is released under the [MIT License](LICENSE).
