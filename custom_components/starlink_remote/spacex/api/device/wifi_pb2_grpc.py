@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from spacex.api.device import wifi_pb2 as spacex_dot_api_dot_device_dot_wifi__pb2
+from . import wifi_pb2 as spacex_dot_api_dot_device_dot_wifi__pb2
 
 
 class MeshStub(object):

@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from spacex.api.device import device_pb2 as spacex_dot_api_dot_device_dot_device__pb2
+from . import device_pb2 as spacex_dot_api_dot_device_dot_device__pb2
 
 
 class DeviceStub(object):

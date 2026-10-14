@@ -1,161 +1,272 @@
-"""Sensor platform for Starlink Remote."""
+"""Sensor platform for Starlink Remote.
+
+Every sensor is described once in ``SENSOR_DESCRIPTIONS``. A description is
+bound either to a device (``dev_types``) or to the account as a whole
+(``"global"``); ``async_setup_entry`` turns the descriptions into entities for
+each device the coordinator has discovered.
+
+Entity names come from ``translation_key`` (see ``strings.json`` under
+``entity.sensor``), so the names stay localisable while the entity ids keep the
+``<device>_<name>`` shape Home Assistant derives from them.
+"""
 from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
-from homeassistant.const import UnitOfDataRate, UnitOfTime, UnitOfInformation, PERCENTAGE, DEGREE
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from homeassistant.const import (
+    DEGREE,
+    PERCENTAGE,
+    UnitOfDataRate,
+    UnitOfInformation,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
-from .const import DATA_DEVICES, DATA_USAGE, DOMAIN
+
+from .const import DATA_DEVICES, DATA_USAGE, DATA_WIFI_CLIENTS, DOMAIN
 from .entity_base import StarlinkEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
-class StarlinkSensorEntityDescription(SensorEntityDescription):
-    value_fn: Callable[[dict[str, Any]], StateType] = lambda x: None
-    attr_fn: Callable[[dict[str, Any]], dict[str, Any]] = lambda x: {}
-    dev_types: list[str] = None
 
-SENSOR_DESCRIPTIONS = (
-    # Global
+@dataclass(frozen=True, kw_only=True)
+class StarlinkSensorEntityDescription(SensorEntityDescription):
+    """A Starlink sensor plus how to read its value out of the poll payload."""
+
+    #: Reads the value out of a device payload (or the whole coordinator data
+    #: for global descriptions).
+    value_fn: Callable[[dict[str, Any]], StateType] = lambda x: None
+    #: Extra attributes for the entity, read from the same payload.
+    attr_fn: Callable[[dict[str, Any]], dict[str, Any]] = lambda x: {}
+    #: Device types the sensor is created for, or ("global",) for account-wide
+    #: sensors which are created once per config entry.
+    dev_types: tuple[str, ...] = ()
+
+
+SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
+    # Account-wide.
     StarlinkSensorEntityDescription(
-        key='data_usage_total', name='Data Usage (Total)', 
-        native_unit_of_measurement=UnitOfInformation.GIGABYTES, 
-        device_class=SensorDeviceClass.DATA_SIZE, 
-        state_class=SensorStateClass.TOTAL_INCREASING, 
-        value_fn=lambda d: d.get(DATA_USAGE, {}).get('total_gb'),
-        dev_types=['global']
-    ),
-    # Common
-    StarlinkSensorEntityDescription(
-        key='state', name='State', 
-        value_fn=lambda d: d.get('status', {}).get('state'),
-        dev_types=['dish', 'router']
-    ),
-    StarlinkSensorEntityDescription(
-        key='uptime', name='Uptime', 
-        native_unit_of_measurement=UnitOfTime.SECONDS, 
-        device_class=SensorDeviceClass.DURATION, 
-        value_fn=lambda d: d.get('status', {}).get('device_state', {}).get('uptime_s'),
-        dev_types=['dish', 'router']
-    ),
-    # Dish Specific
-    StarlinkSensorEntityDescription(
-        key='downlink_throughput', name='Downlink Throughput', 
-        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND, 
-        device_class=SensorDeviceClass.DATA_RATE, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: round(float(d.get('status', {}).get('downlink_throughput_bps', 0)) / 1e6, 2),
-        dev_types=['dish']
+        key="data_usage_total",
+        translation_key="data_usage_total",
+        native_unit_of_measurement=UnitOfInformation.GIGABYTES,
+        device_class=SensorDeviceClass.DATA_SIZE,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda d: d.get(DATA_USAGE, {}).get("total_gb"),
+        dev_types=("global",),
     ),
     StarlinkSensorEntityDescription(
-        key='uplink_throughput', name='Uplink Throughput', 
-        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND, 
-        device_class=SensorDeviceClass.DATA_RATE, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: round(float(d.get('status', {}).get('uplink_throughput_bps', 0)) / 1e6, 2),
-        dev_types=['dish']
+        key="state",
+        translation_key="state",
+        value_fn=lambda d: d.get("status", {}).get("state"),
+        dev_types=("dish", "router"),
     ),
     StarlinkSensorEntityDescription(
-        key='ping_latency', name='Ping Latency', 
-        native_unit_of_measurement=UnitOfTime.MILLISECONDS, 
-        device_class=SensorDeviceClass.DURATION, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: d.get('status', {}).get('pop_ping_latency_ms'),
-        dev_types=['dish']
+        key="uptime",
+        translation_key="uptime",
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.get("status", {})
+        .get("device_state", {})
+        .get("uptime_s"),
+        dev_types=("dish", "router"),
+    ),
+    # Dish only.
+    StarlinkSensorEntityDescription(
+        key="downlink_throughput",
+        translation_key="downlink_throughput",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: round(
+            float(d.get("status", {}).get("downlink_throughput_bps", 0)) / 1e6, 2
+        ),
+        dev_types=("dish",),
     ),
     StarlinkSensorEntityDescription(
-        key='obstruction_fraction', name='Obstruction Fraction', 
-        native_unit_of_measurement=PERCENTAGE, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: round(float(d.get('status', {}).get('obstruction_stats', {}).get('fraction_obstructed', 0))*100.0, 2) if d.get('status', {}).get('obstruction_stats') else None,
-        dev_types=['dish']
+        key="uplink_throughput",
+        translation_key="uplink_throughput",
+        native_unit_of_measurement=UnitOfDataRate.MEGABITS_PER_SECOND,
+        device_class=SensorDeviceClass.DATA_RATE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: round(
+            float(d.get("status", {}).get("uplink_throughput_bps", 0)) / 1e6, 2
+        ),
+        dev_types=("dish",),
     ),
     StarlinkSensorEntityDescription(
-        key='boresight_azimuth', name='Boresight Azimuth', 
-        native_unit_of_measurement=DEGREE, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: d.get('status', {}).get('boresight_azimuth_deg'),
-        dev_types=['dish']
+        key="ping_latency",
+        translation_key="ping_latency",
+        native_unit_of_measurement=UnitOfTime.MILLISECONDS,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.get("status", {}).get("pop_ping_latency_ms"),
+        dev_types=("dish",),
     ),
     StarlinkSensorEntityDescription(
-        key='tilt_angle', name='Tilt Angle', 
-        native_unit_of_measurement=DEGREE, 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: d.get('status', {}).get('alignment_stats', {}).get('tilt_angle_deg'),
-        dev_types=['dish']
+        key="obstruction_fraction",
+        translation_key="obstruction_fraction",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: (
+            round(
+                float(
+                    d.get("status", {})
+                    .get("obstruction_stats", {})
+                    .get("fraction_obstructed", 0)
+                )
+                * 100.0,
+                2,
+            )
+            if d.get("status", {}).get("obstruction_stats")
+            else None
+        ),
+        dev_types=("dish",),
     ),
-    # DISH EVENT LOGS
     StarlinkSensorEntityDescription(
-        key='bootcount', name='Boot Count', 
-        state_class=SensorStateClass.TOTAL_INCREASING, 
-        value_fn=lambda d: d.get('status', {}).get('device_info', {}).get('bootcount'),
-        dev_types=['dish']
+        key="boresight_azimuth",
+        translation_key="boresight_azimuth",
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.get("status", {}).get("boresight_azimuth_deg"),
+        dev_types=("dish",),
     ),
     StarlinkSensorEntityDescription(
-        key='searching_events', name='Searching Events', 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: len([o for o in d.get('history', {}).get('outages', []) if o.get('cause') == 'SEARCHING']),
-        attr_fn=lambda d: {'outages': [o for o in d.get('history', {}).get('outages', []) if o.get('cause') == 'SEARCHING']},
-        dev_types=['dish']
+        key="tilt_angle",
+        translation_key="tilt_angle",
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.get("status", {})
+        .get("alignment_stats", {})
+        .get("tilt_angle_deg"),
+        dev_types=("dish",),
+    ),
+    # Dish event log.
+    StarlinkSensorEntityDescription(
+        key="bootcount",
+        translation_key="bootcount",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.get("status", {}).get("device_info", {}).get("bootcount"),
+        dev_types=("dish",),
     ),
     StarlinkSensorEntityDescription(
-        key='total_outages', name='Total Outages', 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: len(d.get('history', {}).get('outages', [])),
-        attr_fn=lambda d: {'outages': d.get('history', {}).get('outages', [])},
-        dev_types=['dish']
-    ),
-    # Router Specific
-    StarlinkSensorEntityDescription(
-        key='wifi_clients', name='WiFi Clients', 
-        native_unit_of_measurement='devices', 
-        state_class=SensorStateClass.MEASUREMENT, 
-        value_fn=lambda d: len(d.get('status', {}).get('clients', [])),
+        key="searching_events",
+        translation_key="searching_events",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: len(
+            [
+                o
+                for o in d.get("history", {}).get("outages", [])
+                if o.get("cause") == "SEARCHING"
+            ]
+        ),
         attr_fn=lambda d: {
-            'client_list': [f"{c.get('name') or c.get('mac_address')} ({c.get('ip_address')})" for c in d.get('status', {}).get('clients', [])],
-            'ping_history': d.get('history', {}).get('ping_latency_ms', [])[-10:]
+            "outages": [
+                o
+                for o in d.get("history", {}).get("outages", [])
+                if o.get("cause") == "SEARCHING"
+            ]
         },
-        dev_types=['router']
+        dev_types=("dish",),
+    ),
+    StarlinkSensorEntityDescription(
+        key="total_outages",
+        translation_key="total_outages",
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: len(d.get("history", {}).get("outages", [])),
+        attr_fn=lambda d: {"outages": d.get("history", {}).get("outages", [])},
+        dev_types=("dish",),
+    ),
+    # Router only.
+    StarlinkSensorEntityDescription(
+        key="wifi_clients",
+        translation_key="wifi_clients",
+        icon="mdi:wifi",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: (
+            len(d[DATA_WIFI_CLIENTS]) if DATA_WIFI_CLIENTS in d else None
+        ),
+        attr_fn=lambda d: {
+            "client_list": [
+                f"{c.get('name') or c.get('given_name') or c.get('mac_address')} "
+                f"({c.get('ip_address')})"
+                for c in d.get(DATA_WIFI_CLIENTS, [])
+            ],
+            "ping_history": d.get("history", {}).get("ping_latency_ms", [])[-10:],
+        },
+        dev_types=("router",),
     ),
 )
 
-async def async_setup_entry(hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback) -> None:
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Create the sensors for every device the coordinator discovered."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    entities = []
-    
-    dish_id = next((tid for tid, d in coordinator.data.get(DATA_DEVICES, {}).items() if d['type'] == 'dish'), None)
-    
-    for tid, dev_data in coordinator.data.get(DATA_DEVICES, {}).items():
-        dev_type = dev_data['type']
+    devices: dict[str, dict[str, Any]] = coordinator.data.get(DATA_DEVICES, {})
+
+    entities: list[StarlinkDeviceSensor] = []
+
+    # Account-wide sensors need one host device to hang off. A dish is preferred
+    # (it is the device the account figure belongs to); otherwise the router.
+    host_id = next(
+        (tid for tid, dev in devices.items() if dev.get("type") == "dish"),
+        next(iter(devices), None),
+    )
+    if host_id is not None:
+        for desc in SENSOR_DESCRIPTIONS:
+            if "global" in desc.dev_types:
+                entities.append(StarlinkDeviceSensor(coordinator, desc, host_id))
+
+    for target_id, dev_data in devices.items():
+        dev_type = dev_data.get("type")
         for desc in SENSOR_DESCRIPTIONS:
             if dev_type in desc.dev_types:
-                entities.append(StarlinkDeviceSensor(coordinator, desc, tid))
-            
-            if 'global' in desc.dev_types:
-                if (dev_type == 'dish') or (not dish_id and dev_type == 'router'):
-                    entities.append(StarlinkDeviceSensor(coordinator, desc, tid))
-                
+                entities.append(StarlinkDeviceSensor(coordinator, desc, target_id))
+
     async_add_entities(entities)
 
+
 class StarlinkDeviceSensor(StarlinkEntity, SensorEntity):
+    """A single sensor reading of one Starlink device."""
+
     entity_description: StarlinkSensorEntityDescription
-    
+
     @property
     def native_value(self) -> StateType:
-        if 'global' in self.entity_description.dev_types:
-            val = self.entity_description.value_fn(self.coordinator.data)
-            if val is not None: return val
-            
+        """Return the value, preferring the account-wide payload for globals."""
+        if "global" in self.entity_description.dev_types:
+            value = self.entity_description.value_fn(self.coordinator.data)
+            if value is not None:
+                return value
+
         dev_data = self.coordinator.data.get(DATA_DEVICES, {}).get(self.target_id, {})
         return self.entity_description.value_fn(dev_data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the description's extra attributes for this device."""
         try:
-            dev_data = self.coordinator.data.get(DATA_DEVICES, {}).get(self.target_id, {})
+            dev_data = self.coordinator.data.get(DATA_DEVICES, {}).get(
+                self.target_id, {}
+            )
             return self.entity_description.attr_fn(dev_data)
-        except: return {}
+        except Exception:  # pylint: disable=broad-except
+            return {}

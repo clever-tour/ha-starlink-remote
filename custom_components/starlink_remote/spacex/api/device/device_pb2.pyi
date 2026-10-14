@@ -1,10 +1,10 @@
-from spacex.api.common.status import status_pb2 as _status_pb2
-from spacex.api.device import command_pb2 as _command_pb2
-from spacex.api.device import common_pb2 as _common_pb2
-from spacex.api.device import dish_pb2 as _dish_pb2
-from spacex.api.device import transceiver_pb2 as _transceiver_pb2
-from spacex.api.device import wifi_pb2 as _wifi_pb2
-from spacex.api.device.services.unlock import service_pb2 as _service_pb2
+from ..common.status import status_pb2 as _status_pb2
+from . import command_pb2 as _command_pb2
+from . import common_pb2 as _common_pb2
+from . import dish_pb2 as _dish_pb2
+from . import transceiver_pb2 as _transceiver_pb2
+from . import wifi_pb2 as _wifi_pb2
+from .services.unlock import service_pb2 as _service_pb2
 from google.protobuf import timestamp_pb2 as _timestamp_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper

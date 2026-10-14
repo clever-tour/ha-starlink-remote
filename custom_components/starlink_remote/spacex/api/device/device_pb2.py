@@ -22,13 +22,13 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 _sym_db = _symbol_database.Default()
 
 
-from spacex.api.common.status import status_pb2 as spacex_dot_api_dot_common_dot_status_dot_status__pb2
-from spacex.api.device import command_pb2 as spacex_dot_api_dot_device_dot_command__pb2
-from spacex.api.device import common_pb2 as spacex_dot_api_dot_device_dot_common__pb2
-from spacex.api.device import dish_pb2 as spacex_dot_api_dot_device_dot_dish__pb2
-from spacex.api.device import transceiver_pb2 as spacex_dot_api_dot_device_dot_transceiver__pb2
-from spacex.api.device import wifi_pb2 as spacex_dot_api_dot_device_dot_wifi__pb2
-from spacex.api.device.services.unlock import service_pb2 as spacex_dot_api_dot_device_dot_services_dot_unlock_dot_service__pb2
+from ..common.status import status_pb2 as spacex_dot_api_dot_common_dot_status_dot_status__pb2
+from . import command_pb2 as spacex_dot_api_dot_device_dot_command__pb2
+from . import common_pb2 as spacex_dot_api_dot_device_dot_common__pb2
+from . import dish_pb2 as spacex_dot_api_dot_device_dot_dish__pb2
+from . import transceiver_pb2 as spacex_dot_api_dot_device_dot_transceiver__pb2
+from . import wifi_pb2 as spacex_dot_api_dot_device_dot_wifi__pb2
+from .services.unlock import service_pb2 as spacex_dot_api_dot_device_dot_services_dot_unlock_dot_service__pb2
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 

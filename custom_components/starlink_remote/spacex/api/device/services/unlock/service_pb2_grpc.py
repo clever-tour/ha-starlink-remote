@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from spacex.api.device.services.unlock import service_pb2 as spacex_dot_api_dot_device_dot_services_dot_unlock_dot_service__pb2
+from . import service_pb2 as spacex_dot_api_dot_device_dot_services_dot_unlock_dot_service__pb2
 
 
 class UnlockServiceStub(object):

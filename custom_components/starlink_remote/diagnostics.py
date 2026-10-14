@@ -1,0 +1,67 @@
+"""Diagnostics support for Starlink Remote.
+
+Settings > Devices & Services > Starlink Remote > Download diagnostics produces
+this file. It contains what is needed to debug a report - coordinator state,
+device keys, session health - and deliberately contains no credential: the
+cookie is redacted even though the file is only handed to the user who asked
+for it, because diagnostics get pasted into public issues.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+
+from .const import CONF_COOKIE, DATA_DEVICES, DOMAIN
+
+
+async def async_get_config_entry_diagnostics(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> dict[str, Any]:
+    """Return redacted diagnostics for a config entry."""
+    coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    devices: dict[str, Any] = (
+        _summarize_devices(coordinator) if coordinator is not None else {}
+    )
+
+    return {
+        "entry": {
+            "title": entry.title,
+            "state": str(entry.state),
+            "data_keys": sorted(entry.data),
+            "cookie": _redact(entry.data.get(CONF_COOKIE)),
+            "options": dict(entry.options),
+        },
+        "coordinator": {
+            "last_update_success": getattr(coordinator, "last_update_success", None),
+            "update_interval": str(getattr(coordinator, "update_interval", None)),
+            "discovered_ids": sorted(getattr(coordinator, "discovered_ids", [])),
+            "auth_failure_active": getattr(coordinator, "_auth_failure_start", None)
+            is not None,
+            "service_lines_available": getattr(coordinator, "_service_lines", None)
+            is not None,
+        },
+        "devices": devices,
+    }
+
+
+def _summarize_devices(coordinator: Any) -> dict[str, Any]:
+    """Describe the polled devices without dumping every telemetry value."""
+    summary: dict[str, Any] = {}
+    for target_id, device in coordinator.data.get(DATA_DEVICES, {}).items():
+        status = device.get("status", {})
+        summary[target_id] = {
+            "type": device.get("type"),
+            "status_keys": sorted(status),
+            "history_keys": sorted(device.get("history", {})),
+            "device_info": status.get("device_info", {}),
+        }
+    return summary
+
+
+def _redact(value: Any) -> str | None:
+    """Describe a stored credential without revealing it."""
+    if not value:
+        return None
+    return f"<redacted {len(str(value))} characters>"

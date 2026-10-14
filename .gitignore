@@ -7,5 +7,8 @@ __pycache__/
 .storage/
 *.log
 
+# Local credentials - the integration reads this file when present
+custom_components/starlink_remote/cookie.txt
+
 # OS
 .DS_Store

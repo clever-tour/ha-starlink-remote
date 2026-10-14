@@ -5,12 +5,14 @@
     "@clever-tour"
   ],
   "config_flow": true,
+  "dependencies": [],
   "documentation": "https://github.com/clever-tour/ha-starlink-remote",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/clever-tour/ha-starlink-remote/issues",
   "requirements": [
     "protobuf>=6.32.0",
     "h2>=4.1.0"
   ],
-  "version": "1.7.0"
+  "version": "1.8.0"
 }

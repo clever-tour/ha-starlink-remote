@@ -13,7 +13,7 @@ class StarlinkButtonEntityDescription(ButtonEntityDescription):
     """Class describing Starlink button entities."""
     request_field: str = ""
     request_factory: Callable[[], Any] = lambda: None
-    dev_types: list[str] = None
+    dev_types: tuple[str, ...] = ()
 
 def get_reboot_request():
     """Create a reboot request."""
@@ -33,26 +33,26 @@ def get_unstow_request():
 BUTTONS = (
     StarlinkButtonEntityDescription(
         key="reboot",
-        name="Reboot",
+        translation_key="reboot",
         request_field="reboot",
         request_factory=get_reboot_request,
-        dev_types=["dish", "router"],
+        dev_types=("dish", "router"),
         icon="mdi:restart"
     ),
     StarlinkButtonEntityDescription(
         key="stow",
-        name="Stow",
+        translation_key="stow",
         request_field="dish_stow",
         request_factory=get_stow_request,
-        dev_types=["dish"],
+        dev_types=("dish",),
         icon="mdi:arrow-down-box"
     ),
     StarlinkButtonEntityDescription(
         key="unstow",
-        name="Unstow",
+        translation_key="unstow",
         request_field="dish_stow",
         request_factory=get_unstow_request,
-        dev_types=["dish"],
+        dev_types=("dish",),
         icon="mdi:arrow-up-box"
     ),
 )

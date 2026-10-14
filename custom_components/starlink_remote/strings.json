@@ -17,10 +17,13 @@
       }
     },
     "abort": {
+      "already_configured": "This Starlink account is already set up.",
       "reauth_successful": "Authentication refreshed successfully."
     },
     "error": {
       "invalid_auth": "Authentication failed. Check your cookie.",
+      "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",
+      "no_service_lines": "The cookie works, but this account has no Starlink service to poll.",
       "no_devices_found": "No Starlink hardware found on this account."
     }
   },
@@ -28,9 +31,104 @@
     "step": {
       "init": {
         "title": "Configure Starlink Remote",
+        "description": "Paste a fresh browser cookie after signing in to starlink.com. The integration verifies it against the account API before it is saved.",
         "data": {
           "cookie": "Update Browser Cookie String"
         }
+      }
+    },
+    "error": {
+      "invalid_auth": "Authentication failed. Check your cookie.",
+      "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",
+      "no_service_lines": "The cookie works, but this account has no Starlink service to poll."
+    }
+  },
+  "issues": {
+    "session_expired": {
+      "title": "Starlink session expired",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Renew the Starlink session",
+            "description": "The account API has been rejecting the stored cookie for a while, so no telemetry is being polled. Sign in to starlink.com, copy the request cookie from your browser and paste it here. The cookie is checked against the account API and only stored when the API accepts it.",
+            "data": {
+              "cookie": "Fresh Browser Cookie String"
+            }
+          }
+        },
+        "error": {
+          "invalid_auth": "Authentication failed. Check your cookie.",
+          "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",
+          "no_service_lines": "The cookie works, but this account has no Starlink service to poll."
+        },
+        "abort": {
+          "entry_not_found": "The integration this repair belongs to no longer exists."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "data_usage_total": {
+        "name": "Data Usage (Total)"
+      },
+      "state": {
+        "name": "State"
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "downlink_throughput": {
+        "name": "Downlink Throughput"
+      },
+      "uplink_throughput": {
+        "name": "Uplink Throughput"
+      },
+      "ping_latency": {
+        "name": "Ping Latency"
+      },
+      "obstruction_fraction": {
+        "name": "Obstruction Fraction"
+      },
+      "boresight_azimuth": {
+        "name": "Boresight Azimuth"
+      },
+      "tilt_angle": {
+        "name": "Tilt Angle"
+      },
+      "bootcount": {
+        "name": "Boot Count"
+      },
+      "searching_events": {
+        "name": "Searching Events"
+      },
+      "total_outages": {
+        "name": "Total Outages"
+      },
+      "wifi_clients": {
+        "name": "WiFi Clients"
+      }
+    },
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      },
+      "gps_valid": {
+        "name": "GPS Valid"
+      },
+      "snr_ok": {
+        "name": "SNR Above Noise Floor"
+      }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
+      },
+      "stow": {
+        "name": "Stow"
+      },
+      "unstow": {
+        "name": "Unstow"
       }
     }
   }
