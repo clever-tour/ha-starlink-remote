@@ -3,17 +3,43 @@
     "step": {
       "user": {
         "title": "Starlink Remote",
-        "description": "Enter your Starlink browser cookie to auto-discover all devices.",
+        "description": "Enter your Starlink browser cookie to auto-discover all devices.\n\n{guide}\n\n{log}",
         "data": {
           "cookie": "Browser Cookie String"
+        },
+        "data_description": {
+          "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
         }
       },
       "reauth_confirm": {
         "title": "Authentication Expired",
-        "description": "Your Starlink session has expired. Please provide a fresh browser cookie to restore telemetry.",
+        "description": "Your Starlink session has expired, so telemetry has stopped. Provide a fresh browser cookie to restore it.\n\n{guide}\n\n{log}",
         "data": {
           "cookie": "Fresh Browser Cookie String"
+        },
+        "data_description": {
+          "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
         }
+      },
+      "connect": {
+        "title": "Connecting to Starlink",
+        "description": "{log}",
+        "progress": {
+          "parse": "Reading the cookie…",
+          "portal": "Priming the portal session…",
+          "account": "Asking the Starlink account API…",
+          "lines": "Reading your service lines…",
+          "discover": "Discovering your hardware…",
+          "reload": "Reloading the integration and polling…"
+        }
+      },
+      "confirm": {
+        "title": "Connection verified",
+        "description": "{log}"
+      },
+      "reauth_done": {
+        "title": "Session refreshed",
+        "description": "{log}"
       }
     },
     "abort": {
@@ -21,20 +47,38 @@
       "reauth_successful": "Authentication refreshed successfully."
     },
     "error": {
-      "invalid_auth": "Authentication failed. Check your cookie.",
+      "invalid_auth": "Authentication failed: the account API refused this cookie. Copy a fresh one from a logged-in tab.",
       "cannot_connect": "Could not reach the Starlink account API. Try again in a moment.",
-      "no_service_lines": "The cookie works, but this account has no Starlink service to poll.",
-      "no_devices_found": "No Starlink hardware found on this account."
+      "no_service_lines": "The cookie works, but this account has no Starlink service to poll."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Configure Starlink Remote",
-        "description": "Paste a fresh browser cookie after signing in to starlink.com. The integration verifies it against the account API before it is saved.",
+        "title": "Starlink Remote",
+        "description": "Paste a new browser cookie for this account, or leave the field empty to keep the stored session.\n\n{guide}\n\n{log}",
         "data": {
-          "cookie": "Update Browser Cookie String"
+          "cookie": "New Browser Cookie String (optional)"
+        },
+        "data_description": {
+          "cookie": "The `cookie` header value from a logged-in starlink.com tab. It is stored locally and never sent anywhere else."
         }
+      },
+      "connect": {
+        "title": "Connecting to Starlink",
+        "description": "{log}",
+        "progress": {
+          "parse": "Reading the cookie…",
+          "portal": "Priming the portal session…",
+          "account": "Asking the Starlink account API…",
+          "lines": "Reading your service lines…",
+          "discover": "Discovering your hardware…",
+          "reload": "Reloading the integration and polling…"
+        }
+      },
+      "confirm": {
+        "title": "Connection verified",
+        "description": "{log}"
       }
     },
     "error": {

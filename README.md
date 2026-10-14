@@ -18,6 +18,7 @@ A Home Assistant integration for remote monitoring and control of Starlink hardw
 - **Telemetry** - throughput (down/up), ping latency, obstruction fraction, orientation (boresight azimuth, tilt), uptime, boot count, searching events and outage totals.
 - **Remote control** - Reboot, Stow and Unstow buttons per dish, plus Reboot for the router.
 - **Self-healing authentication** - the integration keeps the browser session alive, detects a session that SpaceX has invalidated and raises a **repair issue** with a fix flow, so the new cookie can be entered right where the problem is reported.
+- **Connection log while connecting** - every cookie is checked in stages and the dialog shows what happens as it happens: cookie parsed, portal session primed, account API answered, service lines and hardware discovered, integration reloaded - each line with its outcome and timing, and the verdict spelled out when something is refused.
 - **Diagnostics** - one-click download (Settings > Devices & Services > Starlink Remote > Download diagnostics) with the cookie redacted.
 - **Translated entities** - entity names come from the translation files, ready for other languages.
 
@@ -53,6 +54,28 @@ A Home Assistant integration for remote monitoring and control of Starlink hardw
 
 Only one entry per Starlink account is accepted: the account number inside the cookie is used as the unique id.
 
+While the cookie is being checked, the dialog walks through the connection and
+shows each step as it completes, so a failure tells you *where* it failed instead
+of just "invalid auth":
+
+```
+### Starlink connection check
+
+✅ Cookie parsed — 7 cookie pairs, account: 1234567 · `2 ms`
+✅ Portal primed — /account/home → HTTP 200, session cookies: 4 · `310 ms`
+✅ Account API answered — GET /api/webagg/v2/service-lines → HTTP 200, 1841 bytes · `180 ms`
+✅ Service lines — 1 service line(s), 1 terminal(s), 1 router(s) · `0 ms`
+✅ Hardware discovery — 2 device id(s): Router-A…, ut010203… · `0 ms`
+
+**Verdict:** session is live - the account API answered with data.
+```
+
+A refused cookie ends on the same screen with the failing line marked and the
+verdict spelled out (`the session is stale or was copied incompletely`), and the
+same log appears for the **Configure** dialog and the repair fix flow - the latter
+also re-checks that the integration reloaded and polled successfully before it
+reports success.
+
 ### How to get your login cookie
 
 1. Log in to [starlink.com/account/home](https://www.starlink.com/account/home).
@@ -83,7 +106,7 @@ Sensors are grouped under the dish and router devices that were discovered on th
 
 **A repair card says the session expired.** SpaceX invalidated the cookie (usually because the account was signed in again somewhere else). Click **Fix** and paste a fresh cookie.
 
-**Entities show `unknown` for a while.** The account API is polled on an interval (default 30 s); `unknown` on the first cycle is normal. A value that stays `unknown` forever is usually a metric the current firmware does not report - see below.
+**Entities show `unknown` for a while.** The account API is polled on an interval (default 60 s); `unknown` on the first cycle is normal. A value that stays `unknown` forever is usually a metric the current firmware does not report - see below.
 
 **"Data Usage (Total)" and "WiFi Clients" are always `unknown`.** These two metrics are not exposed by the API surface the integration can use. The account (webagg) service-lines payload carries no usage counter, and the router firmware (`api_version 129`) answers every client-list request with `Unimplemented`. Both entities deliberately report `unknown` rather than a wrong number, and will start reporting values by themselves if SpaceX ever exposes the data.
 

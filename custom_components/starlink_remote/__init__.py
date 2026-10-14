@@ -9,12 +9,40 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
 from . import storage
-from .const import DOMAIN, ISSUE_SESSION_EXPIRED
+from .const import CONF_COOKIE, DOMAIN, ISSUE_SESSION_EXPIRED
 from .coordinator import StarlinkCoordinator
+from .session import account_number_from_cookie
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate an old config entry.
+
+    Version 1 entries were created before the config flow used the account
+    number as the unique id, so a second flow for the same account could still
+    create a duplicate entry. Migration derives the unique id from the stored
+    cookie and moves the entry to version 2.
+    """
+    if entry.version > 2:
+        # Downgrading is not supported.
+        return False
+
+    if entry.version == 1:
+        account_number = account_number_from_cookie(entry.data.get(CONF_COOKIE, ""))
+        if account_number:
+            hass.config_entries.async_update_entry(
+                entry, unique_id=account_number, version=2
+            )
+        else:
+            # Cannot derive the unique id from this cookie; leave the entry as
+            # it is rather than moving it to a version it does not match.
+            return True
+
+    _LOGGER.debug("Migrated Starlink Remote entry %s to version %s", entry.entry_id, entry.version)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
