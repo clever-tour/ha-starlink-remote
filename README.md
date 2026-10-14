@@ -103,6 +103,7 @@ reports success.
 | State, Uptime, Downlink/Uplink throughput, Ping latency, Obstruction fraction | Dish (and State/Uptime on the router) | - |
 | Boresight azimuth, Tilt angle, Boot count, Searching events, Total outages | Dish | Diagnostic |
 | WiFi clients | Router | Diagnostic |
+| Data usage (total), WiFi client counts | Dish, Router | Diagnostic |
 | Connected | Router | - |
 | Reboot / Stow / Unstow | Dish; Reboot also on the router | - |
 
@@ -112,9 +113,13 @@ Sensors are grouped under the dish and router devices that were discovered on th
 
 **A repair card says the session expired.** SpaceX invalidated the cookie (usually because the account was signed in again somewhere else). Click **Fix** and paste a fresh cookie.
 
-**Entities show `unknown` for a while.** The account API is polled on an interval (default 60 s); `unknown` on the first cycle is normal. A value that stays `unknown` forever is usually a metric the current firmware does not report - see below.
+**Entities show `unknown` for a while.** The account is polled on an interval (default 60 s); `unknown` on the first cycle is normal. A value that stays `unknown` forever is usually a metric the current firmware does not report - see below.
 
-**"Data Usage (Total)" and "WiFi Clients" are always `unknown`.** These two metrics are not exposed by the API surface the integration can use. The account (webagg) service-lines payload carries no usage counter, and the router firmware (`api_version 129`) answers every client-list request with `Unimplemented`. Both entities deliberately report `unknown` rather than a wrong number, and will start reporting values by themselves if SpaceX ever exposes the data.
+**"Data Usage (Total)"** is read from the account's own data-usage aggregate: the total consumed in the **current billing cycle**, in GB, refreshed with the poll interval. Its attributes carry the cycle window, the plan bucket and the per-day breakdown, so it can be charted day by day. The figure is account data, not something the dish reports.
+
+**"WiFi Clients"** is the router's client count from the account telemetry snapshot, with the per-band counts (2.4 GHz / 5 GHz / ethernet) and the WAN byte counters as attributes. A router that is in bypass mode reports zero clients and `wifi_bypassed: true` - that is a real reading, not a missing one. The per-device gRPC surface (`api_version 129`) returns no client list at all.
+
+Both entities report `unknown` only while a poll has not completed yet.
 
 **Debug logging.** Add the following to `configuration.yaml` to capture a full poll cycle before opening an issue:
 

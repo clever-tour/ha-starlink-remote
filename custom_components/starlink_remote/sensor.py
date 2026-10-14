@@ -53,6 +53,43 @@ class StarlinkSensorEntityDescription(SensorEntityDescription):
     dev_types: tuple[str, ...] = ()
 
 
+
+def _wifi_client_count(device: dict[str, Any]) -> StateType:
+    """Return the number of clients on a router.
+
+    Two shapes can answer this: a client *list* (a firmware that reports one
+    over gRPC, the richer payload) and the account telemetry *counts*. Both
+    answer the same question, so whichever arrived is used.
+    """
+    clients = device.get(DATA_WIFI_CLIENTS)
+    if isinstance(clients, list):
+        return len(clients)
+    if isinstance(clients, dict):
+        return clients.get("count")
+    return None
+
+
+def _wifi_client_attributes(device: dict[str, Any]) -> dict[str, Any]:
+    """Return the per-band detail that sits next to the client count."""
+    clients = device.get(DATA_WIFI_CLIENTS)
+    attributes: dict[str, Any] = {}
+    if isinstance(clients, list):
+        attributes["client_list"] = [
+            f"{c.get('name') or c.get('given_name') or c.get('mac_address')} "
+            f"({c.get('ip_address')})"
+            for c in clients
+        ]
+    elif isinstance(clients, dict):
+        attributes["clients_2ghz"] = clients.get("count_2ghz")
+        attributes["clients_5ghz"] = clients.get("count_5ghz")
+        attributes["clients_ethernet"] = clients.get("count_ethernet")
+        attributes["wan_rx_bytes"] = clients.get("wan_rx_bytes")
+        attributes["wan_tx_bytes"] = clients.get("wan_tx_bytes")
+        attributes["wifi_bypassed"] = clients.get("bypassed")
+        attributes["software_version"] = clients.get("software_version")
+    attributes["ping_history"] = device.get("history", {}).get("ping_latency_ms", [])[-10:]
+    return attributes
+
 SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
     # Account-wide.
     StarlinkSensorEntityDescription(
@@ -62,6 +99,13 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DATA_SIZE,
         state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=lambda d: d.get(DATA_USAGE, {}).get("total_gb"),
+        attr_fn=lambda d: {
+            "billing_cycle_start": d.get(DATA_USAGE, {}).get("cycle_start"),
+            "billing_cycle_end": d.get(DATA_USAGE, {}).get("cycle_end"),
+            "plan_bucket": d.get(DATA_USAGE, {}).get("bucket"),
+            "usage_limit_gb": d.get(DATA_USAGE, {}).get("limit_gb"),
+            "daily_usage_gb": d.get(DATA_USAGE, {}).get("daily_gb"),
+        },
         dev_types=("global",),
     ),
     StarlinkSensorEntityDescription(
@@ -199,17 +243,8 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
         translation_key="wifi_clients",
         icon="mdi:wifi",
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda d: (
-            len(d[DATA_WIFI_CLIENTS]) if DATA_WIFI_CLIENTS in d else None
-        ),
-        attr_fn=lambda d: {
-            "client_list": [
-                f"{c.get('name') or c.get('given_name') or c.get('mac_address')} "
-                f"({c.get('ip_address')})"
-                for c in d.get(DATA_WIFI_CLIENTS, [])
-            ],
-            "ping_history": d.get("history", {}).get("ping_latency_ms", [])[-10:],
-        },
+        value_fn=_wifi_client_count,
+        attr_fn=_wifi_client_attributes,
         dev_types=("router",),
     ),
 )
@@ -264,6 +299,10 @@ class StarlinkDeviceSensor(StarlinkEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the description's extra attributes for this device."""
         try:
+            if "global" in self.entity_description.dev_types:
+                # Account-wide descriptions read the whole payload, exactly as
+                # native_value does for them.
+                return self.entity_description.attr_fn(self.coordinator.data)
             dev_data = self.coordinator.data.get(DATA_DEVICES, {}).get(
                 self.target_id, {}
             )

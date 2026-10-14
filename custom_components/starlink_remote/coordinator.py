@@ -3,9 +3,10 @@ DataUpdateCoordinator for Starlink Remote - Universal Discovery & Telemetry.
 
 All HTTP traffic goes through a single httpx.Client (HTTP/2) that carries the
 browser session cookie harvested from starlink.com. Telemetry is read over the
-device gRPC-Web endpoint; the account (webagg) API is used for hardware
-discovery. The account-wide data usage figure is *not* part of that payload,
-so the router's own client counters are published separately instead.
+device gRPC-Web endpoint; the account APIs are used for hardware discovery,
+for the account-wide data usage figure (a telemetry aggregate reports it once
+per billing cycle) and for the routers' Wi-Fi client counts, which the
+per-device gRPC polls do not expose on api_version 129.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import logging
 import os
 import re
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -34,6 +35,8 @@ from .const import (
     DOMAIN,
     STARLINK_API_URL,
     STARLINK_AUTH_URL,
+    STARLINK_DEVICE_TELEMETRY,
+    STARLINK_TELEMETRYAGG_DATA_USAGE,
     STARLINK_WEB_SERVICE_LINES,
     UA,
 )
@@ -74,6 +77,23 @@ _USAGE_KEY_HINTS = frozenset(
 #: Bounds for the debug payload skeleton: keeps the diagnostic line small.
 _SHAPE_MAX_ENTRIES = 80
 _SHAPE_MAX_DEPTH = 7
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """Return an ISO timestamp from an account payload as an aware datetime."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _as_count(value: Any) -> int | None:
+    """Return ``value`` as an int for a counter, or None when it is not one."""
+    number = _as_number(value)
+    return int(number) if number is not None else None
 
 
 def _payload_shape(node: Any, prefix: str = "") -> list[str]:
@@ -450,32 +470,193 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return round(value / 1024**3, 3)
         return round(value, 3)
 
-    def _account_data_usage(self) -> dict[str, Any] | None:
-        """Return the account-wide data usage from the cached webagg payload.
+    def _service_line_ids(self) -> tuple[str, str] | None:
+        """Return the account reference id and service line number of this entry.
 
-        Verified against the live account: the service-lines payload that the
-        cookie-authenticated webagg API returns carries no usage counter at all
-        (subscription flags and hardware inventory only), and the billing-period
-        figure on starlink.com/account/home comes from a request the portal makes
-        outside this API. The scan is kept for a future API revision, but until
-        one ships a counter the caller publishes the router's own client totals
-        under a separate key rather than presenting them as the account total.
+        Both come from the cached service-lines payload and are the path
+        parameters the account APIs take.
         """
-        payload = self._service_lines
-        if payload is None:
+        if not self._service_lines:
+            return None
+        results = (self._service_lines.get("content") or {}).get("results") or []
+        if not results:
+            return None
+        account = results[0].get("accountReferenceId")
+        service_line = results[0].get("serviceLineNumber")
+        if not account or not service_line:
+            return None
+        return str(account), str(service_line)
+
+    @staticmethod
+    def _current_billing_cycle(
+        cycles: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Return the billing cycle that contains now, else the most recent."""
+        parsed: list[tuple[datetime, datetime, dict[str, Any]]] = []
+        for cycle in cycles:
+            start = _parse_datetime(cycle.get("startDate"))
+            end = _parse_datetime(cycle.get("endDate"))
+            if start is not None and end is not None:
+                parsed.append((start, end, cycle))
+        if not parsed:
+            return cycles[-1] if cycles else None
+        now = datetime.now(timezone.utc)
+        for start, end, cycle in parsed:
+            if start <= now < end:
+                return cycle
+        return max(parsed, key=lambda item: item[1])[2]
+
+    def _account_data_usage(self) -> dict[str, Any] | None:
+        """Return the data usage of the current billing cycle (SyncWorker).
+
+        The figure the Starlink app shows under "Data usage" is an account
+        value: the annotated aggregate answers with one entry per billing cycle,
+        each carrying the total consumed in that cycle plus a per-day
+        breakdown. Read from the account API only - the per-device gRPC polls
+        cannot produce it and the service-lines payload does not hold it.
+        """
+        ids = self._service_line_ids()
+        if not self._client or ids is None:
+            return None
+        account, service_line = ids
+
+        try:
+            response = self._client.get(
+                STARLINK_TELEMETRYAGG_DATA_USAGE.format(
+                    account=account, service_line=service_line
+                ),
+                headers=self._session_headers,
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.debug("Data usage fetch failed: %s", err, exc_info=True)
             return None
 
-        found = self._find_usage_entry(payload)
-        if found is not None:
-            path, value = found
-            _LOGGER.debug("Account data usage read from %s", path)
-            return {"total_gb": self._usage_to_gb(path, value)}
+        if response.status_code == 401:
+            self._handle_auth_failure()
+            return None
+        if response.status_code != 200:
+            _LOGGER.debug("Data usage fetch returned HTTP %s", response.status_code)
+            return None
+        try:
+            payload = response.json()
+        except ValueError as err:
+            _LOGGER.debug("Data usage payload is not JSON: %s", err)
+            return None
 
-        _LOGGER.debug(
-            "No data usage counter in the service-lines payload; keys seen: %s; shape: %s",
-            sorted(payload)[:25] if isinstance(payload, dict) else type(payload).__name__,
-            _payload_shape(payload),
+        content = payload.get("content") or {}
+        cycle = self._current_billing_cycle(
+            content.get("billingCyclesAnnotated") or []
         )
+        if cycle is None:
+            _LOGGER.debug(
+                "Data usage payload holds no billing cycle; keys seen: %s",
+                sorted(content)[:25],
+            )
+            return None
+
+        total = _as_number(cycle.get("totalAmountGB"))
+        if total is None:
+            return None
+
+        lines = cycle.get("dataUsageSummaryLines") or [{}]
+        buckets = content.get("dataBuckets") or []
+        index = lines[0].get("dataBucketIndex") or 0
+        bucket = buckets[index].get("name") if 0 <= index < len(buckets) else None
+        limit = _as_number(lines[0].get("usageLimitGB"))
+        daily = [
+            round(number, 3)
+            for row in (cycle.get("dailyData") or [])
+            if (number := _as_number(row[0] if isinstance(row, list) and row else row))
+            is not None
+        ]
+        _LOGGER.debug(
+            "Data usage: %.3f GB between %s and %s (%s day(s) reported)",
+            total,
+            cycle.get("startDate"),
+            cycle.get("endDate"),
+            len(daily),
+        )
+        return {
+            "total_gb": round(total, 3),
+            "limit_gb": round(limit, 3) if limit else None,
+            "bucket": bucket,
+            "cycle_start": cycle.get("startDate"),
+            "cycle_end": cycle.get("endDate"),
+            "daily_gb": daily,
+        }
+
+    def _cloud_telemetry(self) -> dict[str, dict[str, Any]]:
+        """Return the account telemetry snapshot, keyed by reported device id.
+
+        Routers publish their Wi-Fi client counts here, per band and over
+        ethernet, together with the WAN counters. The per-device gRPC polls
+        return no client list on api_version 129 and the counts belong to the
+        account, so no local network access is involved.
+        """
+        ids = self._service_line_ids()
+        if not self._client or ids is None:
+            return {}
+        account, _ = ids
+
+        try:
+            response = self._client.post(
+                STARLINK_DEVICE_TELEMETRY,
+                headers=self._session_headers,
+                json={"accountNumber": account},
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.debug("Telemetry fetch failed: %s", err, exc_info=True)
+            return {}
+
+        if response.status_code == 401:
+            self._handle_auth_failure()
+            return {}
+        if response.status_code != 200:
+            _LOGGER.debug("Telemetry fetch returned HTTP %s", response.status_code)
+            return {}
+        try:
+            payload = response.json()
+        except ValueError as err:
+            _LOGGER.debug("Telemetry payload is not JSON: %s", err)
+            return {}
+
+        snapshot = payload.get("data") or {}
+        legends = snapshot.get("columnNamesByDeviceType") or {}
+        records: dict[str, dict[str, Any]] = {}
+        for row in snapshot.get("values") or []:
+            if not isinstance(row, list) or not row:
+                continue
+            legend = legends.get(row[0])
+            if not legend:
+                continue
+            record = dict(zip(legend, row))
+            device_id = record.get("DeviceId")
+            if device_id:
+                records[str(device_id)] = record
+        _LOGGER.debug(
+            "Account telemetry: %s record(s) for device types %s",
+            len(records),
+            sorted(legends)[:10],
+        )
+        return records
+
+    @staticmethod
+    def _match_telemetry_id(
+        target_id: str, telemetry: dict[str, dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Return the telemetry record belonging to a discovered target id.
+
+        The two sides spell a hardware id differently (the account reports
+        ``Router-0100000000000000008B65AD`` where discovery keeps the router's
+        short id), so they are compared on the normalised hex tail.
+        """
+        wanted = re.sub(r"[^0-9a-z]", "", target_id.lower())
+        if len(wanted) < 6:
+            return None
+        for device_id, record in telemetry.items():
+            found = re.sub(r"[^0-9a-z]", "", device_id.lower())
+            if found == wanted or found.endswith(wanted) or wanted.endswith(found):
+                return record
         return None
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -495,7 +676,6 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {DATA_DEVICES: {}}
 
         data: dict[str, Any] = {DATA_DEVICES: {}}
-        all_clients: list[dict[str, Any]] = []
         headers = {
             **self._session_headers,
             "origin": "https://www.starlink.com",
@@ -545,14 +725,13 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             # list on api_version 129, and every dedicated
                             # client request (wifi_get_clients,
                             # wifi_get_client_history, wifi_get_ping_metrics)
-                            # answers "Unimplemented" or empty. The list is
-                            # therefore only published when a future firmware
-                            # starts reporting it - the sensor stays "unknown"
-                            # rather than claiming zero clients.
+                            # answers "Unimplemented" or empty. A list is still
+                            # accepted here so a firmware that starts reporting
+                            # one is picked up; otherwise the client counts come
+                            # from the account telemetry further down.
                             clients = raw.get("clients") or []
                             if clients:
                                 device_data[DATA_WIFI_CLIENTS] = clients
-                                all_clients.extend(clients)
 
                 # 2. HISTORY
                 response_history = self._client.post(
@@ -583,16 +762,35 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # repair issue instead.
                 _LOGGER.debug("Poll failed for %s: %s", target_id, err)
 
-        if all_clients:
-            data[DATA_WIFI_CLIENTS] = all_clients
+        # Account-wide figures, both read from the account APIs: the data usage
+        # of the current billing cycle, and the Wi-Fi client counts the routers
+        # report to the telemetry snapshot. A router whose gRPC status response
+        # delivered a real client list keeps that list.
         usage = self._account_data_usage()
         if usage is not None:
             data[DATA_USAGE] = usage
 
-        # The service-lines payload carries no usage counter (verified against
-        # the live account), so no account-wide number can be published: the
-        # account usage sensor stays "unknown" rather than showing a zero that
-        # looks like a real reading.
+        telemetry = self._cloud_telemetry()
+        if telemetry:
+            for target_id, device_data in data[DATA_DEVICES].items():
+                if device_data.get("type") != "router":
+                    continue
+                if DATA_WIFI_CLIENTS in device_data:
+                    continue
+                record = self._match_telemetry_id(target_id, telemetry)
+                if record is None:
+                    continue
+                device_data[DATA_WIFI_CLIENTS] = {
+                    "count": _as_count(record.get("Clients")),
+                    "count_2ghz": _as_count(record.get("Clients2Ghz")),
+                    "count_5ghz": _as_count(record.get("Clients5Ghz")),
+                    "count_ethernet": _as_count(record.get("ClientsEth")),
+                    "wan_rx_bytes": _as_count(record.get("WanRxBytes")),
+                    "wan_tx_bytes": _as_count(record.get("WanTxBytes")),
+                    "bypassed": record.get("WifiIsBypassed"),
+                    "hardware_version": record.get("WifiHardwareVersion"),
+                    "software_version": record.get("WifiSoftwareVersion"),
+                }
 
         return data
 

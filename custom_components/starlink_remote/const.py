@@ -40,8 +40,25 @@ UA = (
 
 # --- Endpoints -------------------------------------------------------------------
 #: Account API: hardware discovery (service lines, terminals, routers).
-#: It does *not* carry the account-wide data usage figure.
+#: The account-wide data usage figure is not part of it; that comes from
+#: STARLINK_TELEMETRYAGG_DATA_USAGE.
 STARLINK_WEB_SERVICE_LINES = "https://api.starlink.com/webagg/v2/accounts/service-lines"
+
+#: Account-wide data usage for one service line, one entry per billing cycle.
+#: The service-lines payload does not carry this figure (its terminals report
+#: their own counters); this is what the Starlink app shows under "Data usage".
+#: Filled with the account reference id and the service line number.
+STARLINK_TELEMETRYAGG_DATA_USAGE = (
+    "https://api.starlink.com/telemetryagg/v1/data-usage/account/{account}"
+    "/service-line/{service_line}/annotated"
+)
+
+#: Per-device telemetry snapshot of one account. Routers report their Wi-Fi
+#: client counts here; the per-device gRPC polls expose no client list on
+#: api_version 129.
+STARLINK_DEVICE_TELEMETRY = (
+    "https://api.starlink.com/device-data/cache/v1/telemetry"
+)
 #: gRPC-Web endpoint for device telemetry. Must stay on the ``www.`` host: an
 #: api. host redirect would turn the POSTs into redirects, which break the
 #: binary gRPC-Web framing.
