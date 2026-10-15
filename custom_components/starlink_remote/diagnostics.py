@@ -13,7 +13,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_COOKIE, DATA_DEVICES, DOMAIN
+from .const import CONF_COOKIE, DATA_DEVICES, DATA_USAGE, DOMAIN
 
 
 async def async_get_config_entry_diagnostics(
@@ -42,7 +42,24 @@ async def async_get_config_entry_diagnostics(
             "service_lines_available": getattr(coordinator, "_service_lines", None)
             is not None,
         },
+        "data_usage": _usage_digest(coordinator),
         "devices": devices,
+    }
+
+
+def _usage_digest(coordinator: Any) -> dict[str, Any]:
+    """Describe the resolved account data usage: the figures, not the payload."""
+    if coordinator is None:
+        return {}
+    usage = (getattr(coordinator, "data", None) or {}).get(DATA_USAGE) or {}
+    return {
+        "total_gb": usage.get("total_gb"),
+        "source": usage.get("source"),
+        "billing_cycle_start": usage.get("cycle_start"),
+        "billing_cycle_end": usage.get("cycle_end"),
+        "usage_limit_gb": usage.get("limit_gb"),
+        "plan_bucket": usage.get("bucket"),
+        "days_reported": len(usage.get("daily_gb") or []),
     }
 
 

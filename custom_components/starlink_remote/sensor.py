@@ -130,6 +130,7 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
             "plan_bucket": d.get(DATA_USAGE, {}).get("bucket"),
             "usage_limit_gb": d.get(DATA_USAGE, {}).get("limit_gb"),
             "daily_usage_gb": d.get(DATA_USAGE, {}).get("daily_gb"),
+            "usage_source": d.get(DATA_USAGE, {}).get("source"),
         },
         dev_types=("global",),
     ),

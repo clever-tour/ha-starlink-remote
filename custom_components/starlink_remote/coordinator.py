@@ -161,6 +161,97 @@ def _as_number(value: Any) -> float | None:
     return None
 
 
+#: Billing-cycle fields that carry the total directly, most authoritative first.
+#: ``totalAmountGB`` is what the portal writes today; the others are checked so a
+#: payload that renames or moves the figure still resolves.
+_CYCLE_TOTAL_KEYS = ("totalAmountGB", "totalUsageGB", "usageAmountGB", "totalGB")
+
+#: Key fragments that mark a number as a cap or a remainder, never as usage.
+_CAP_KEY_FRAGMENTS = ("limit", "cap", "allowance", "remaining")
+
+#: Key fragments that mark a number as a usage amount.
+_USAGE_KEY_FRAGMENTS = ("gb", "amount", "usage", "used")
+
+
+def _is_usage_key(key: str) -> bool:
+    """Return True when ``key`` names a usage amount rather than a cap."""
+    lowered = key.lower()
+    if any(fragment in lowered for fragment in _CAP_KEY_FRAGMENTS):
+        return False
+    return any(fragment in lowered for fragment in _USAGE_KEY_FRAGMENTS)
+
+
+def _daily_usage_values(cycle: dict[str, Any]) -> list[float]:
+    """Return the per-day usage numbers of one billing cycle, in report order."""
+    values: list[float] = []
+    for row in cycle.get("dailyData") or []:
+        raw = row[0] if isinstance(row, list) and row else row
+        if isinstance(raw, dict):
+            raw = next(
+                (item for key, item in raw.items() if _is_usage_key(str(key))), None
+            )
+        number = _as_number(raw)
+        if number is not None:
+            values.append(round(number, 3))
+    return values
+
+
+def _sum_usage_lines(rows: Any) -> float | None:
+    """Sum the usage amounts of ``dataUsageSummaryLines``, None when there are none.
+
+    Only usage keys count: ``usageLimitGB`` is the cap of the bucket, not the
+    amount used, so summing the line verbatim would report the plan instead.
+    """
+    total = 0.0
+    seen = False
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        for key, value in row.items():
+            if not _is_usage_key(str(key)):
+                continue
+            number = _as_number(value)
+            if number is None or number < 0:
+                continue
+            total += number
+            seen = True
+    return round(total, 3) if seen else None
+
+
+def _cycle_usage_gb(cycle: dict[str, Any]) -> tuple[float | None, str]:
+    """Return the usage of one billing cycle and the field it was read from.
+
+    The annotated payload carries the cycle total in ``totalAmountGB`` for the
+    accounts seen so far. An account that bills more than one data bucket keeps
+    the per-bucket figures in ``dataUsageSummaryLines`` and the per-day series in
+    ``dailyData``; when the cycle total is missing or zero those are summed
+    instead, so such an account does not read as a flat zero. A cycle that
+    genuinely has no usage still reports 0.
+    """
+    reported = _as_number(cycle.get("totalAmountGB"))
+    if reported:
+        return reported, "totalAmountGB"
+    for key in _CYCLE_TOTAL_KEYS[1:]:
+        value = _as_number(cycle.get(key))
+        if value:
+            return value, key
+    lines_total = _sum_usage_lines(cycle.get("dataUsageSummaryLines"))
+    if lines_total:
+        return lines_total, "dataUsageSummaryLines"
+    daily_total = sum(_daily_usage_values(cycle))
+    if daily_total > 0:
+        return round(daily_total, 3), "dailyData"
+    # Nothing in the cycle reports usage: keep whatever it did carry, so an
+    # idle cycle stays 0 rather than becoming unknown.
+    if reported is not None:
+        return reported, "totalAmountGB"
+    if lines_total is not None:
+        return lines_total, "dataUsageSummaryLines"
+    if daily_total == 0 and cycle.get("dailyData"):
+        return 0.0, "dailyData"
+    return None, ""
+
+
 class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Handle session persistence, hardware discovery and gRPC-Web polling."""
 
@@ -175,6 +266,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._xsrf_token = ""
         self._service_lines: Any = None
         self._service_lines_read_at: float = 0.0
+        # Last successfully read account data usage: the figure is a monthly
+        # counter, so it is kept when a poll cannot read it (see the update loop).
+        self._last_usage: dict[str, Any] | None = None
 
         # Error tracking: how long the account API has been rejecting the
         # session, and whether that was already reported to the user.
@@ -519,7 +613,10 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for start, end, cycle in parsed:
             if start <= now < end:
                 return cycle
-        return max(parsed, key=lambda item: item[1])[2]
+        # No cycle covers now: a portal revision may reorder the list or leave the
+        # dates unparsable. The most recently started cycle is the best answer,
+        # taking the last element would depend on the order the API happens to use.
+        return max(parsed, key=lambda item: item[0])[2]
 
     def _account_data_usage(self) -> dict[str, Any] | None:
         """Return the data usage of the current billing cycle (SyncWorker).
@@ -569,30 +666,48 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return None
 
-        total = _as_number(cycle.get("totalAmountGB"))
+        total, source = _cycle_usage_gb(cycle)
         if total is None:
+            _LOGGER.debug(
+                "Data usage: the current billing cycle carries no usage counter; "
+                "payload shape: %s",
+                _payload_shape(content),
+            )
             return None
+        if not total:
+            _LOGGER.debug(
+                "Data usage: the current billing cycle reports 0 GB; cycle shape: %s",
+                _payload_shape(cycle),
+            )
 
-        lines = cycle.get("dataUsageSummaryLines") or [{}]
+        lines = cycle.get("dataUsageSummaryLines") or []
         buckets = content.get("dataBuckets") or []
-        index = lines[0].get("dataBucketIndex") or 0
-        bucket = buckets[index].get("name") if 0 <= index < len(buckets) else None
-        limit = _as_number(lines[0].get("usageLimitGB"))
-        daily = [
-            round(number, 3)
-            for row in (cycle.get("dailyData") or [])
-            if (number := _as_number(row[0] if isinstance(row, list) and row else row))
-            is not None
-        ]
+        names: list[str] = []
+        limits: list[float] = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            index = line.get("dataBucketIndex") or 0
+            if 0 <= index < len(buckets):
+                name = buckets[index].get("name")
+                if name and name not in names:
+                    names.append(name)
+            if (limit := _as_number(line.get("usageLimitGB"))) and limit > 0:
+                limits.append(limit)
+        bucket = ", ".join(names) or None
+        limit = sum(limits) if limits else None
+        daily = _daily_usage_values(cycle)
         _LOGGER.debug(
-            "Data usage: %.3f GB between %s and %s (%s day(s) reported)",
+            "Data usage: %.3f GB (read from %s) between %s and %s (%s day(s) reported)",
             total,
+            source,
             cycle.get("startDate"),
             cycle.get("endDate"),
             len(daily),
         )
         return {
             "total_gb": round(total, 3),
+            "source": source,
             "limit_gb": round(limit, 3) if limit else None,
             "bucket": bucket,
             "cycle_start": cycle.get("startDate"),
@@ -783,7 +898,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # delivered a real client list keeps that list.
         usage = self._account_data_usage()
         if usage is not None:
-            data[DATA_USAGE] = usage
+            self._last_usage = usage
+        if self._last_usage is not None:
+            data[DATA_USAGE] = self._last_usage
 
         telemetry = self._cloud_telemetry()
         if telemetry:
