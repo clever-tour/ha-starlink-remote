@@ -189,6 +189,15 @@
       },
       "wifi_clients": {
         "name": "WiFi Clients"
+      },
+      "last_event": {
+        "name": "Last Event"
+      },
+      "power": {
+        "name": "Power"
+      },
+      "energy": {
+        "name": "Energy"
       }
     },
     "binary_sensor": {
@@ -202,20 +211,14 @@
         "name": "SNR Above Noise Floor"
       }
     },
-    "button": {
-      "reboot": {
-        "name": "Reboot"
-      },
-      "stow": {
-        "name": "Stow"
-      },
-      "unstow": {
-        "name": "Unstow"
-      }
-    },
     "event": {
       "events": {
         "name": "Events"
+      }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
       }
     }
   }

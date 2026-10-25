@@ -197,6 +197,35 @@ def _client_count(device: dict[str, Any]) -> int | None:
     return None
 
 
+def summarise(event: dict[str, Any]) -> str:
+    """Return a one-line, human-readable description of an event.
+
+    The event entity already carries the raw detail as attributes; this text is
+    what a dashboard or a logbook line can show without templating.
+    """
+    kind = str(event.get("event_type") or "event")
+    attributes = event.get("attributes") or {}
+    if kind == "rebooted":
+        return (
+            f"restarted (boot {attributes.get('bootcount')}, "
+            f"uptime {attributes.get('uptime_s')} s)"
+        )
+    if kind == "state_changed":
+        return f"state {attributes.get('from')} \u2192 {attributes.get('to')}"
+    if kind in ("searching", "obstructed", "outage"):
+        return (
+            f"{kind} ({attributes.get('cause')}) for "
+            f"{attributes.get('duration_s')} s"
+        )
+    if kind == "alert":
+        return f"alert {attributes.get('alert')} ({attributes.get('source')})"
+    if kind == "update_state_changed":
+        return f"software update {attributes.get('from')} \u2192 {attributes.get('to')}"
+    if kind == "clients_changed":
+        return f"Wi-Fi clients {attributes.get('from')} \u2192 {attributes.get('to')}"
+    return kind
+
+
 @dataclass(frozen=True, kw_only=True)
 class StarlinkEventEntityDescription(EventEntityDescription):
     """Description of a Starlink event entity."""
@@ -254,5 +283,8 @@ class StarlinkEventEntity(StarlinkEntity, EventEntity):
         )
         previous, self._previous = self._previous, current
         for event in detect_events(previous, current):
-            self._trigger_event(event["event_type"], event["attributes"])
+            self._trigger_event(
+                event["event_type"],
+                {**event["attributes"], "summary": summarise(event)},
+            )
         super()._handle_coordinator_update()

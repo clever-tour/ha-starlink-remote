@@ -20,7 +20,6 @@ import time
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowHandler, FlowResult
@@ -221,7 +220,7 @@ class CookieConnectFlow(FlowHandler):
                 await self._async_phase_reload()
                 return
             await self.hass.async_add_executor_job(probe.run_phase, phase)
-        except Exception as err:  # noqa: BLE001 - a phase must never stall the flow
+        except Exception as err:
             _LOGGER.debug("Cookie check: phase %s failed: %s", phase, err, exc_info=True)
             if probe.phase_result(phase) is None:
                 probe.error = probe.error or ERROR_CANNOT_CONNECT
@@ -331,15 +330,26 @@ class StarlinkConfigFlow(CookieConnectFlow, config_entries.ConfigFlow, domain=DO
         # list, in the repair issue and in the session-expired notification.
         account = account_number_from_cookie(cookie)
         if account:
-            await self.async_set_unique_id(account)
-            if any(
-                existing.unique_id == account
+            # A second entry for the same account is allowed on purpose, so the
+            # unique id has to be unique per entry: Home Assistant removes an
+            # existing entry when a new flow finishes with the same unique id,
+            # which would silently replace the first account instead of adding
+            # a second one.
+            unique_id = account
+            taken = {
+                existing.unique_id
                 for existing in self.hass.config_entries.async_entries(DOMAIN)
-            ):
+            }
+            index = 2
+            while unique_id in taken:
+                unique_id = f"{account}#{index}"
+                index += 1
+            if unique_id != account:
                 _LOGGER.info(
                     "Adding another entry for the Starlink account ending in %s",
                     account[-8:],
                 )
+            await self.async_set_unique_id(unique_id)
 
         return self.async_create_entry(
             title=entry_title(self.hass, account), data={CONF_COOKIE: cookie}
@@ -348,8 +358,16 @@ class StarlinkConfigFlow(CookieConnectFlow, config_entries.ConfigFlow, domain=DO
     async def async_step_reauth(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle re-authentication when the cookie expired."""
-        return await self.async_step_reauth_confirm(user_input)
+        """Handle re-authentication when the cookie expired.
+
+        Home Assistant seeds a re-authentication flow with the data of the
+        entry - the cookie that has just expired. That value arrives here as
+        ``user_input`` even though the user typed nothing, so it must not be
+        taken for a submitted cookie: doing so ran the whole connection check
+        on the dead credential before the dialog had even been shown, and
+        opened the repair with a failed log instead of the form.
+        """
+        return await self.async_step_reauth_confirm(None)
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -518,7 +536,7 @@ async def async_store_and_reload(
     previous = entry.data.get(CONF_COOKIE, "")
     await async_store_cookie(hass, entry, cookie)
 
-    await hass.config_entries.async_reload(entry.entry_id)
+    await async_reload_entry(hass, entry)
     if _update_is_live(hass, entry.entry_id):
         probe.add_result(
             PhaseResult(
@@ -534,7 +552,7 @@ async def async_store_and_reload(
     # reinstate the old credential and report the failure rather than closing the
     # dialog with a success message for a session that does not work.
     await async_store_cookie(hass, entry, previous)
-    await hass.config_entries.async_reload(entry.entry_id)
+    await async_reload_entry(hass, entry)
     probe.error = ERROR_CANNOT_CONNECT
     probe.add_result(
         PhaseResult(
@@ -544,6 +562,23 @@ async def async_store_and_reload(
             0,
         )
     )
+
+
+async def async_reload_entry(
+    hass: HomeAssistant, entry: config_entries.ConfigEntry
+) -> None:
+    """Reload ``entry`` without aborting the flow that asked for it.
+
+    ``ConfigEntries.async_reload()`` aborts every re-authentication flow of the
+    entry before it starts - which is this flow, when a repair or a re-auth
+    dialog reloads the entry it is running in: the progress task is cancelled
+    and the dialog never reaches its report. Unloading and setting up the entry
+    again has the same effect on the integration (a fresh coordinator, built
+    with the new cookie) and leaves the flow running.
+    """
+    if entry.state.recoverable:
+        await hass.config_entries.async_unload(entry.entry_id)
+    await hass.config_entries.async_setup(entry.entry_id)
 
 
 async def async_store_cookie(

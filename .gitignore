@@ -9,9 +9,26 @@ __pycache__/
 
 # Local credentials - the integration reads this file when present
 custom_components/starlink_remote/cookie.txt
+cookie.txt
+.env
+.env.*
+
+# Saved account pages and captured traffic must never be committed
+account_home.html
+*.har
+
+# Development environment - never part of the upload package
+.venv/
+release/
+MEMORY/
+logs/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store
-
-# saved account pages must never be committed
-account_home.html

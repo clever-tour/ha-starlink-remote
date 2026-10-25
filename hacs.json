@@ -1,1 +1,4 @@
-{"name": "Starlink Remote"}
+{
+  "name": "Starlink Remote",
+  "homeassistant": "2024.11.0"
+}

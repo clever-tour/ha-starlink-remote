@@ -10,10 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_COOKIE, DATA_DEVICES, DATA_USAGE, DOMAIN
+
+#: Values that are personal data rather than debugging context.
+TO_REDACT = {CONF_COOKIE, "title", "id", "discovered_ids"}
 
 
 async def async_get_config_entry_diagnostics(
@@ -25,7 +29,11 @@ async def async_get_config_entry_diagnostics(
         _summarize_devices(coordinator) if coordinator is not None else {}
     )
 
-    return {
+    # The entry title carries the last 8 characters of the account number
+    # (see config_flow.entry_title), and diagnostics are routinely pasted into
+    # public issues - so the title and every hardware id are redacted too.
+    return async_redact_data(
+        {
         "entry": {
             "title": entry.title,
             "state": str(entry.state),
@@ -44,7 +52,9 @@ async def async_get_config_entry_diagnostics(
         },
         "data_usage": _usage_digest(coordinator),
         "devices": devices,
-    }
+        },
+        TO_REDACT,
+    )
 
 
 def _usage_digest(coordinator: Any) -> dict[str, Any]:
@@ -66,9 +76,12 @@ def _usage_digest(coordinator: Any) -> dict[str, Any]:
 def _summarize_devices(coordinator: Any) -> dict[str, Any]:
     """Describe the polled devices without dumping every telemetry value."""
     summary: dict[str, Any] = {}
-    for target_id, device in coordinator.data.get(DATA_DEVICES, {}).items():
+    # Device keys are hardware ids; number them instead of publishing them.
+    for index, (_target_id, device) in enumerate(
+        coordinator.data.get(DATA_DEVICES, {}).items(), start=1
+    ):
         status = device.get("status", {})
-        summary[target_id] = {
+        summary[f"device_{index}"] = {
             "type": device.get("type"),
             "status_keys": sorted(status),
             "history_keys": sorted(device.get("history", {})),

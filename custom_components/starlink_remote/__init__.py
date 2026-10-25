@@ -24,6 +24,8 @@ from .session import account_number_from_cookie
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Read-only integration with one exception: the restart button is kept on
+#: purpose; stow/unstow and every other write action are not implemented.
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,

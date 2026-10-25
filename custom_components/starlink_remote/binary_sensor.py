@@ -1,13 +1,22 @@
 """Binary sensor platform for Starlink Remote."""
 from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
-from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity, BinarySensorEntityDescription
+from typing import Any
+
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+    BinarySensorEntityDescription,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
 from .const import DATA_DEVICES, DOMAIN
 from .entity_base import StarlinkEntity
+
 
 @dataclass(frozen=True, kw_only=True)
 class StarlinkBinarySensorEntityDescription(BinarySensorEntityDescription):
@@ -50,7 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: Any, async_add_entities:
 
 class StarlinkBinarySensor(StarlinkEntity, BinarySensorEntity):
     entity_description: StarlinkBinarySensorEntityDescription
-    
+
     @property
     def is_on(self) -> bool | None:
         dev_data = self.coordinator.data.get(DATA_DEVICES, {}).get(self.target_id, {})

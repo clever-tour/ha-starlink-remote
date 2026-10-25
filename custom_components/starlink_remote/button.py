@@ -1,34 +1,38 @@
-"""Button platform for Starlink Remote."""
+"""Button platform for Starlink Remote.
+
+Only the restart command is exposed. Stow/unstow and every other state-changing
+command were removed: the binding is read-only against the Starlink API except
+for this one action, which the user explicitly keeps available.
+"""
 from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
+
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
 from .const import DATA_DEVICES, DOMAIN
 from .entity_base import StarlinkEntity
 
+
 @dataclass(frozen=True, kw_only=True)
 class StarlinkButtonEntityDescription(ButtonEntityDescription):
-    """Class describing Starlink button entities."""
+    """Describe a Starlink button."""
+
     request_field: str = ""
     request_factory: Callable[[], Any] = lambda: None
     dev_types: tuple[str, ...] = ()
 
-def get_reboot_request():
-    """Create a reboot request."""
+
+def get_reboot_request() -> Any:
+    """Return a restart request."""
     from .spacex.api.device.device_pb2 import RebootRequest
+
     return RebootRequest()
 
-def get_stow_request():
-    """Create a stow request."""
-    from .spacex.api.device.dish_pb2 import DishStowRequest
-    return DishStowRequest(unstow=False)
-
-def get_unstow_request():
-    """Create an unstow request."""
-    from .spacex.api.device.dish_pb2 import DishStowRequest
-    return DishStowRequest(unstow=True)
 
 BUTTONS = (
     StarlinkButtonEntityDescription(
@@ -37,46 +41,32 @@ BUTTONS = (
         request_field="reboot",
         request_factory=get_reboot_request,
         dev_types=("dish", "router"),
-        icon="mdi:restart"
-    ),
-    StarlinkButtonEntityDescription(
-        key="stow",
-        translation_key="stow",
-        request_field="dish_stow",
-        request_factory=get_stow_request,
-        dev_types=("dish",),
-        icon="mdi:arrow-down-box"
-    ),
-    StarlinkButtonEntityDescription(
-        key="unstow",
-        translation_key="unstow",
-        request_field="dish_stow",
-        request_factory=get_unstow_request,
-        dev_types=("dish",),
-        icon="mdi:arrow-up-box"
+        icon="mdi:restart",
     ),
 )
 
-async def async_setup_entry(hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback) -> None:
-    """Set up the Starlink button platform."""
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Create the button for every device the coordinator discovered."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    entities = []
-    for tid, dev_data in coordinator.data.get(DATA_DEVICES, {}).items():
-        dev_type = dev_data["type"]
-        for desc in BUTTONS:
-            if dev_type in desc.dev_types:
-                entities.append(StarlinkDeviceButton(coordinator, desc, tid))
+    entities: list[StarlinkDeviceButton] = []
+    for target_id, device in coordinator.data.get(DATA_DEVICES, {}).items():
+        for description in BUTTONS:
+            if device.get("type") in description.dev_types:
+                entities.append(StarlinkDeviceButton(coordinator, description, target_id))
     async_add_entities(entities)
 
+
 class StarlinkDeviceButton(StarlinkEntity, ButtonEntity):
-    """Representation of a Starlink button."""
+    """A command button of one Starlink device."""
+
     entity_description: StarlinkButtonEntityDescription
-    
+
     async def async_press(self) -> None:
-        """Handle the button press."""
-        req_data = self.entity_description.request_factory()
+        """Send the command to this device."""
+        request = self.entity_description.request_factory()
         await self.coordinator.async_send_command(
-            self.target_id, 
-            self.entity_description.request_field, 
-            req_data
+            self.target_id, self.entity_description.request_field, request
         )

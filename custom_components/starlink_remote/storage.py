@@ -24,6 +24,7 @@ the permission bits, the layout and the purge policy are defined in one place.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -140,6 +141,43 @@ def save_discovered_ids(hass: HomeAssistant, entry_id: str, ids: set[str]) -> No
         _LOGGER.error("Failed to store the hardware history: %s", err)
 
 
+def load_energy(hass: HomeAssistant, entry_id: str) -> tuple[float, float]:
+    """Return the accumulated energy (Wh) and the timestamp it refers to."""
+    try:
+        with open(history_path(hass, entry_id), encoding="utf-8") as handle:
+            payload = json_load(handle.read())
+    except FileNotFoundError:
+        return 0.0, 0.0
+    except OSError as err:
+        _LOGGER.error("Failed to read the energy state: %s", err)
+        return 0.0, 0.0
+    try:
+        return float(payload.get("energy_wh", 0.0)), float(payload.get("energy_last_ts", 0.0))
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def save_energy(hass: HomeAssistant, entry_id: str, energy_wh: float, last_ts: float) -> None:
+    """Persist the accumulated energy next to the hardware history."""
+    path = history_path(hass, entry_id)
+    payload: dict[str, object] = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json_load(handle.read())
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        _LOGGER.error("Failed to read the history before saving energy: %s", err)
+    payload["energy_wh"] = round(energy_wh, 3)
+    payload["energy_last_ts"] = last_ts
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(json_dump(payload))
+    except OSError as err:
+        _LOGGER.error("Failed to store the energy state: %s", err)
+
+
 def purge_session_data(hass: HomeAssistant, entry_id: str) -> list[str]:
     """Delete the stored credential of one entry, keeping its metrics.
 
@@ -175,10 +213,8 @@ def purge_session_data(hass: HomeAssistant, entry_id: str) -> list[str]:
 
     # Tidy the directory away as well, but only when it ended up empty: with
     # the metrics file still inside os.rmdir() fails and the file stays put.
-    try:
+    with contextlib.suppress(OSError):
         os.rmdir(directory)
-    except OSError:
-        pass
 
     return removed
 
@@ -254,10 +290,8 @@ def migrate_legacy_files(
             entry_id,
         )
     # Tidy the flat directory away when nothing is left in it.
-    try:
+    with contextlib.suppress(OSError):
         os.rmdir(legacy)
-    except OSError:
-        pass
     return moved
 
 

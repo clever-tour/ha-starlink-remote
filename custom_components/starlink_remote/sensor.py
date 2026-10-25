@@ -12,8 +12,9 @@ Entity names come from ``translation_key`` (see ``strings.json`` under
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -25,16 +26,20 @@ from homeassistant.const import (
     DEGREE,
     PERCENTAGE,
     UnitOfDataRate,
+    UnitOfEnergy,
     UnitOfInformation,
+    UnitOfPower,
     UnitOfTime,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.util import dt as dt_util
 
 from .const import DATA_DEVICES, DATA_USAGE, DATA_WIFI_CLIENTS, DOMAIN
 from .entity_base import StarlinkEntity
+from .event import detect_events, summarise
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +56,10 @@ class StarlinkSensorEntityDescription(SensorEntityDescription):
     #: Device types the sensor is created for, or ("global",) for account-wide
     #: sensors which are created once per config entry.
     dev_types: tuple[str, ...] = ()
+    #: Only create the entity when the device actually reports a value. Used for
+    #: fields that exist on newer hardware but not on every dish/router, so the
+    #: entity never sits at `unknown` for the whole lifetime of an entry.
+    optional: bool = False
 
 
 
@@ -123,14 +132,24 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfInformation.GIGABYTES,
         device_class=SensorDeviceClass.DATA_SIZE,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda d: d.get(DATA_USAGE, {}).get("total_gb"),
+        # Show the big figure, not 650.689: Home Assistant rounds the display
+        # while the state keeps the exact value (also exposed as an attribute).
+        suggested_display_precision=0,
+        # The state is the big figure; the exact value stays as an attribute.
+        value_fn=lambda d: (
+            round(d[DATA_USAGE]["total_gb"])
+            if (d.get(DATA_USAGE) or {}).get("total_gb") is not None
+            else None
+        ),
         attr_fn=lambda d: {
+            "total_gb_exact": d.get(DATA_USAGE, {}).get("total_gb"),
             "billing_cycle_start": d.get(DATA_USAGE, {}).get("cycle_start"),
             "billing_cycle_end": d.get(DATA_USAGE, {}).get("cycle_end"),
             "plan_bucket": d.get(DATA_USAGE, {}).get("bucket"),
             "usage_limit_gb": d.get(DATA_USAGE, {}).get("limit_gb"),
             "daily_usage_gb": d.get(DATA_USAGE, {}).get("daily_gb"),
             "usage_source": d.get(DATA_USAGE, {}).get("source"),
+            "usage_field": d.get(DATA_USAGE, {}).get("field"),
         },
         dev_types=("global",),
     ),
@@ -265,6 +284,54 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
         attr_fn=lambda d: {"outages": d.get("history", {}).get("outages", [])},
         dev_types=("dish",),
     ),
+    # Both devices: the text of the most recent event (see StarlinkLastEventSensor).
+    StarlinkSensorEntityDescription(
+        key="last_event",
+        translation_key="last_event",
+        icon="mdi:timeline-clock-outline",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: None,
+        dev_types=("dish", "router"),
+    ),
+    # Dish only, and only once a power series has been seen: energy is the
+    # integral of that series over time, so it starts at 0 on first sight.
+    StarlinkSensorEntityDescription(
+        key="energy",
+        translation_key="energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        icon="mdi:lightning-bolt-circle",
+        value_fn=lambda d: d.get("energy_kwh"),
+        attr_fn=lambda d: {
+            "average_power_w": (d.get("power", {}) or {}).get("average_w"),
+            "window_minutes": (d.get("power", {}) or {}).get("window_minutes"),
+        },
+        optional=True,
+        dev_types=("dish",),
+    ),
+    # Router only, and only when the router powers the dish over PoE (not in
+    # bypass mode, where the PoE stats are absent).
+    StarlinkSensorEntityDescription(
+        key="power",
+        translation_key="power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:flash",
+        value_fn=lambda d: (
+            (d.get("status", {}).get("poe_stats", {}) or {}).get("poe_power")
+            if d.get("type") == "router"
+            else (d.get("power", {}) or {}).get("average_w")
+        ),
+        attr_fn=lambda d: {
+            key: value
+            for key, value in (d.get("power", {}) or {}).items()
+            if key != "average_w"
+        },
+        optional=True,
+        dev_types=("dish", "router"),
+    ),
     # Router only.
     StarlinkSensorEntityDescription(
         key="wifi_clients",
@@ -301,7 +368,15 @@ async def async_setup_entry(
     for target_id, dev_data in devices.items():
         dev_type = dev_data.get("type")
         for desc in SENSOR_DESCRIPTIONS:
-            if dev_type in desc.dev_types:
+            if dev_type not in desc.dev_types:
+                continue
+            if desc.optional and desc.value_fn(dev_data) is None:
+                # The hardware does not report this field; an entity that is
+                # permanently `unknown` is worse than no entity.
+                continue
+            if desc.key == "last_event":
+                entities.append(StarlinkLastEventSensor(coordinator, desc, target_id))
+            else:
                 entities.append(StarlinkDeviceSensor(coordinator, desc, target_id))
 
     async_add_entities(entities)
@@ -337,3 +412,47 @@ class StarlinkDeviceSensor(StarlinkEntity, SensorEntity):
             return self.entity_description.attr_fn(dev_data)
         except Exception:  # pylint: disable=broad-except
             return {}
+
+
+class StarlinkLastEventSensor(StarlinkEntity, SensorEntity):
+    """The content of the most recent event of one device.
+
+    The event platform fires events, which a dashboard cannot show as text; this
+    sensor keeps the latest one as its state and exposes the raw detail as
+    attributes, so the dish's own outage/alert wording is visible in Home
+    Assistant without templating the event entity.
+    """
+
+    entity_description: StarlinkSensorEntityDescription
+
+    def __init__(self, coordinator: Any, description: Any, target_id: str) -> None:
+        """Initialize the sensor with an explicit "no event yet" state.
+
+        A brand-new entity must not show `unknown`: "no event yet" is a fact.
+        """
+        super().__init__(coordinator, description, target_id)
+        self._previous: dict[str, Any] = {}
+        self._attr_native_value = "no event yet"
+        self._last: dict[str, Any] | None = None
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Publish the newest difference between this poll and the previous one."""
+        current = self.coordinator.data.get(DATA_DEVICES, {}).get(self.target_id, {})
+        previous, self._previous = self._previous, current
+        events = detect_events(previous, current)
+        if events:
+            event = events[-1]
+            self._last = {
+                "event_type": event["event_type"],
+                **event.get("attributes", {}),
+                "summary": summarise(event),
+                "when": dt_util.utcnow().isoformat(),
+            }
+            self._attr_native_value = summarise(event)
+        super()._handle_coordinator_update()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the detail of the event the state describes."""
+        return dict(self._last or {})

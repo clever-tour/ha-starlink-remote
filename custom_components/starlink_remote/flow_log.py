@@ -27,9 +27,16 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from homeassistant.util.ssl import get_default_context
 
 from . import session
-from .const import STARLINK_AUTH_URL, STARLINK_WEB_SERVICE_LINES, UA
+from .const import (
+    STARLINK_AUTH_URL,
+    STARLINK_PORTAL_HOME,
+    STARLINK_TOKEN_REFRESH,
+    STARLINK_WEB_SERVICE_LINES,
+    UA,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,23 +122,48 @@ class CookieProbe:
         #: Short description of what discovery found, used by the coordinator-less
         #: flows to say something concrete about the account.
         self.hardware: list[str] = []
-        self._client = httpx.Client(
-            http2=True, timeout=_TIMEOUT, follow_redirects=True
-        )
+        # Built lazily, in the executor, so constructing the probe never loads
+        # a CA bundle on the event loop. Home Assistant's preloaded context is
+        # passed so no certificate file is read even then.
+        self._client: httpx.Client | None = None
         self._service_lines: Any = None
         self._portal_html = ""
+        # Bearer token minted from the SSO cookie when the access cookie expired.
+        self._bearer = ""
 
     # -- lifecycle ---------------------------------------------------------
 
+    @property
+    def client(self) -> httpx.Client:
+        """Return the HTTP client, creating it in the calling (executor) thread."""
+        if self._client is None:
+            self._client = httpx.Client(
+                http2=True,
+                timeout=_TIMEOUT,
+                follow_redirects=True,
+                verify=get_default_context(),
+            )
+        return self._client
+
     def close(self) -> None:
         """Release the HTTP client held for the duration of the probe."""
+        if self._client is None:
+            return
         try:
             self._client.close()
         except Exception:  # pragma: no cover - defensive, closing must not fail a flow
             _LOGGER.debug("Cookie probe: closing the HTTP client failed", exc_info=True)
 
     def next_phase(self) -> str | None:
-        """Return the next phase to run, or ``None`` when all of them ran."""
+        """Return the next phase to run, or ``None`` when all of them ran.
+
+        A phase that failed fatally ends the sequence: the later phases build on
+        its result, so running them would only produce misleading lines - a
+        refused session left the service-line phase to report "no service
+        lines", which reads as a working cookie on an empty account.
+        """
+        if self.error is not None:
+            return None
         done = {result.key for result in self.results}
         for phase in self.phases:
             if phase not in done:
@@ -172,7 +204,7 @@ class CookieProbe:
             self.add_result(
                 PhaseResult(name, False, f"network error: {type(err).__name__}", _ms(started))
             )
-        except Exception as err:  # noqa: BLE001 - a probe must never break the flow
+        except Exception as err:
             _LOGGER.debug("Cookie check: phase %s failed unexpectedly: %s", name, err, exc_info=True)
             self.error = self.error or "cannot_connect"
             self.add_result(
@@ -185,8 +217,8 @@ class CookieProbe:
         pairs = [part for part in self.cookie.split(";") if "=" in part]
         access = re.findall(r"Starlink\.Com\.Access\.[^=;]+=", self.cookie)
         self.account = session.account_number_from_cookie(self.cookie)
-        xsrf = bool(session.xsrf_token(self._client, self.cookie))
-        session.apply_cookie(self._client, self.cookie)
+        xsrf = bool(session.xsrf_token(self.client, self.cookie))
+        session.apply_cookie(self.client, self.cookie)
 
         detail = (
             f"{len(pairs)} cookie pairs, {len(access)} `Starlink.Com.Access.*`, "
@@ -207,14 +239,14 @@ class CookieProbe:
         """Touch the portal so the jar gets its rotated session cookies."""
         started = time.perf_counter()
         statuses = []
-        for url in ("https://www.starlink.com/account/home", STARLINK_AUTH_URL):
-            response = self._client.get(url, headers=_PORTAL_HEADERS)
+        for url in (STARLINK_PORTAL_HOME, STARLINK_AUTH_URL):
+            response = self.client.get(url, headers=_PORTAL_HEADERS)
             statuses.append(f"{urlparse(url).path} → HTTP {response.status_code}")
             if url.endswith("/account/home") and response.status_code == 200:
                 self._portal_html = response.text
 
         rotated = len(
-            [c for c in self._client.cookies.jar if c.name.startswith("Starlink.Com.Access")]
+            [c for c in self.client.cookies.jar if c.name.startswith("Starlink.Com.Access")]
         )
         return PhaseResult(
             "portal",
@@ -224,17 +256,42 @@ class CookieProbe:
             warning=rotated == 0,
         )
 
+    def _mint_bearer(self) -> bool:
+        """Ask the portal for a bearer token from the SSO cookie."""
+        try:
+            response = self.client.get(
+                STARLINK_TOKEN_REFRESH,
+                headers={
+                    "User-Agent": UA,
+                    "cookie": self.cookie,
+                    "accept": "application/json",
+                    "origin": "https://starlink.com",
+                    "referer": "https://starlink.com/account/home",
+                },
+            )
+        except httpx.HTTPError:
+            return False
+        if response.status_code != 200:
+            return False
+        try:
+            token = response.json().get("accessToken")
+        except ValueError:
+            return False
+        self._bearer = token if isinstance(token, str) else ""
+        return bool(self._bearer)
+
     def _phase_account(self) -> PhaseResult:
         """Ask the account API for the service lines and judge the answer."""
         started = time.perf_counter()
-        response = self._client.get(
-            STARLINK_WEB_SERVICE_LINES,
-            headers={
-                "User-Agent": UA,
-                "x-xsrf-token": session.xsrf_token(self._client, self.cookie),
-                **_API_HEADERS,
-            },
-        )
+        headers = {
+            "User-Agent": UA,
+            "x-xsrf-token": session.xsrf_token(self.client, self.cookie),
+            **_API_HEADERS,
+        }
+        response = self.client.get(STARLINK_WEB_SERVICE_LINES, headers=headers)
+        if response.status_code == 401 and self._mint_bearer():
+            headers = {**headers, "Authorization": f"Bearer {self._bearer}"}
+            response = self.client.get(STARLINK_WEB_SERVICE_LINES, headers=headers)
         detail = (
             f"GET /api/webagg/v2/service-lines → HTTP {response.status_code}, "
             f"{len(response.content)} bytes"
@@ -372,7 +429,7 @@ def _ms(started: float) -> int:
 
 __all__ = [
     "CONNECT_PHASES",
-    "CookieProbe",
     "PHASE_LABELS",
+    "CookieProbe",
     "PhaseResult",
 ]

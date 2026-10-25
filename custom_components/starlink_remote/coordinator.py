@@ -10,18 +10,21 @@ per-device gRPC polls do not expose on api_version 129.
 """
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import re
+import struct
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from google.protobuf.json_format import MessageToDict
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util.ssl import get_default_context
 
 from . import notify, session, storage
 from .const import (
@@ -35,10 +38,16 @@ from .const import (
     DOMAIN,
     STARLINK_API_URL,
     STARLINK_AUTH_URL,
+    STARLINK_DATA_USAGE_EXPORT,
     STARLINK_DEVICE_TELEMETRY,
+    STARLINK_PORTAL_HOME,
     STARLINK_TELEMETRYAGG_DATA_USAGE,
+    STARLINK_TOKEN_REFRESH,
     STARLINK_WEB_SERVICE_LINES,
     UA,
+    USAGE_SOURCE_ANNOTATED,
+    USAGE_SOURCE_EXPORT,
+    USAGE_SOURCE_TELEMETRY,
 )
 from .spacex.api.device.device_pb2 import (
     GetHistoryRequest,
@@ -74,9 +83,47 @@ _USAGE_KEY_HINTS = frozenset(
 )
 
 
+#: gRPC-Web request kinds this integration is allowed to send. The two reads
+#: are the poll; ``reboot`` is the single write the user keeps available. Stow,
+#: unstow, factory reset and every configuration write are refused here and are
+#: not implemented anywhere in the component.
+ALLOWED_GRPC_REQUESTS = frozenset({"get_status", "get_history", "reboot"})
+
+#: The power series added by newer dish firmware: a repeated float field in the
+#: history message, one sample per second, 15 minutes = 900 values. The schema
+#: shipped here predates the field, so it is found by shape rather than number:
+#: an unknown length-delimited field whose payload is 600-1200 plausible watts.
+POWER_SAMPLE_MIN = 600
+POWER_SAMPLE_MAX = 1200
+POWER_VALUE_MAX = 400.0
+
 #: Bounds for the debug payload skeleton: keeps the diagnostic line small.
 _SHAPE_MAX_ENTRIES = 80
 _SHAPE_MAX_DEPTH = 7
+
+
+def _read_varint(buffer: bytes, position: int) -> tuple[int, int]:
+    """Read a protobuf varint; returns ``(value, new_position)``."""
+    result = shift = 0
+    while True:
+        byte = buffer[position]
+        position += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result, position
+        shift += 7
+
+
+def development_cookie_file() -> str:
+    """Return the cookie file used when neither storage nor the entry has one.
+
+    ``STARLINK_REMOTE_COOKIE_FILE`` points it outside the source tree, which is
+    how the development environment keeps a real cookie out of the repository;
+    without the variable the historical location next to the component is used.
+    """
+    return os.environ.get("STARLINK_REMOTE_COOKIE_FILE") or os.path.join(
+        os.path.dirname(__file__), CONF_COOKIE_FILE
+    )
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -87,7 +134,7 @@ def _parse_datetime(value: Any) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _as_count(value: Any) -> int | None:
@@ -115,7 +162,7 @@ def _payload_shape(node: Any, prefix: str = "") -> list[str]:
             entries.append(f"{path}[] ({len(value)} items)")
             for index, item in enumerate(value[:2]):
                 walk(item, f"{path}[{index}]", depth + 1)
-        elif isinstance(value, bool) or isinstance(value, (int, float)):
+        elif isinstance(value, (bool, int, float)):
             entries.append(f"{path}={value}")
         elif isinstance(value, str):
             entries.append(f"{path}=str[{len(value)}]")
@@ -269,6 +316,12 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Last successfully read account data usage: the figure is a monthly
         # counter, so it is kept when a poll cannot read it (see the update loop).
         self._last_usage: dict[str, Any] | None = None
+        # Accumulated dish energy, in Wh, integrated from the history series.
+        self._energy_wh: float = 0.0
+        self._energy_last_ts: float = 0.0
+        self._energy_saved: float = 0.0
+        # Which source last produced a usable figure (see _account_data_usage).
+        self._usage_source: str | None = None
 
         # Error tracking: how long the account API has been rejecting the
         # session, and whether that was already reported to the user.
@@ -280,6 +333,10 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._alerts_cleared = False
 
         self._client: httpx.Client | None = None
+        # Bearer token minted from the SSO cookie; the cookie's access tokens
+        # expire long before the session does (see _refresh_bearer).
+        self._bearer_token: str = ""
+        self._bearer_valid_until: float = 0.0
 
         super().__init__(
             hass,
@@ -302,16 +359,83 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def _session_headers(self) -> dict[str, str]:
-        """Return the browser-like headers that carry the session cookie."""
-        return {
+        """Return the headers that carry the session (cookie + bearer token)."""
+        headers = {
             "User-Agent": UA,
             "cookie": self._raw_cookie,
             "x-xsrf-token": self._xsrf_token,
         }
+        if self._bearer_token and time.time() < self._bearer_valid_until:
+            headers["Authorization"] = f"Bearer {self._bearer_token}"
+        return headers
+
+    def _refresh_bearer(self) -> bool:
+        """Mint a bearer token from the SSO cookie (SyncWorker).
+
+        The access cookies the browser hands out expire within minutes while the
+        SSO session stays valid; the web app calls this endpoint to keep working,
+        and both the REST APIs and gRPC-Web accept the resulting token. Without
+        it, a perfectly good session shows up as ``token_expired``.
+        """
+        if not self._client or not self._raw_cookie:
+            return False
+        try:
+            response = self._client.get(
+                STARLINK_TOKEN_REFRESH,
+                headers={
+                    "User-Agent": UA,
+                    "cookie": self._raw_cookie,
+                    "accept": "application/json",
+                    "origin": "https://starlink.com",
+                    "referer": "https://starlink.com/account/home",
+                },
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.debug("Token refresh failed: %s", err, exc_info=True)
+            return False
+        if response.status_code != 200:
+            _LOGGER.debug("Token refresh returned HTTP %s", response.status_code)
+            return False
+        try:
+            payload = response.json()
+        except ValueError:
+            _LOGGER.debug("Token refresh body is not JSON")
+            return False
+        token = payload.get("accessToken")
+        if not isinstance(token, str) or len(token) < 20:
+            _LOGGER.debug("Token refresh carried no access token")
+            return False
+        try:
+            lifetime = int(payload.get("expiresIn") or 0)
+        except (TypeError, ValueError):
+            lifetime = 0
+        self._bearer_token = token
+        # Renew a minute early so a poll never races the expiry.
+        self._bearer_valid_until = time.time() + max(lifetime - 60, 30)
+        _LOGGER.debug("Minted a bearer token valid for %s s", lifetime)
+        return True
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Send a request, refreshing the bearer token once when it expired."""
+        if self._client is None:
+            raise RuntimeError("HTTP client is not initialised")
+        headers = {**self._session_headers, **kwargs.pop("headers", {})}
+        response = self._client.request(method, url, headers=headers, **kwargs)
+        if self._auth_lost(response) and self._refresh_bearer():
+            headers = {**self._session_headers, **kwargs.pop("headers", {})}
+            response = self._client.request(method, url, headers=headers, **kwargs)
+        return response
+
+    def _auth_lost(self, response: httpx.Response) -> bool:
+        """Return True when a response says the access token is not accepted."""
+        if response.status_code == 401:
+            return True
+        return "token_expired" in response.text[:200]
 
     async def _async_setup(self) -> None:
         """Load persisted state and prime the session (runs once per setup)."""
         await self.hass.async_add_executor_job(self._init_client_and_load_data)
+        await self.hass.async_add_executor_job(self._refresh_bearer)
         await self.hass.async_add_executor_job(self._refresh_session)
         await self.hass.async_add_executor_job(self._discover_hardware)
 
@@ -334,7 +458,12 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._client is None:
             # One client for the whole lifetime of the entry, so HTTP/2 keeps
             # the TLS connection to starlink.com open between polls.
-            self._client = httpx.Client(http2=True, timeout=15.0, follow_redirects=True)
+            self._client = httpx.Client(
+                http2=True,
+                timeout=15.0,
+                follow_redirects=True,
+                verify=get_default_context(),
+            )
 
         self._load_persistent_data()
 
@@ -348,7 +477,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         source = "storage file" if persisted_cookie else ""
 
         if not self._raw_cookie:
-            dev_cookie_file = os.path.join(os.path.dirname(__file__), CONF_COOKIE_FILE)
+            dev_cookie_file = development_cookie_file()
             if os.path.exists(dev_cookie_file):
                 try:
                     with open(dev_cookie_file, encoding="utf-8") as handle:
@@ -376,6 +505,10 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Restore the hardware ids discovered on earlier runs (SyncWorker)."""
         self.discovered_ids |= storage.load_discovered_ids(self.hass, self.entry_id)
         self._saved_ids = set(self.discovered_ids)
+        energy_wh, last_ts = storage.load_energy(self.hass, self.entry_id)
+        self._energy_wh = energy_wh
+        self._energy_saved = energy_wh
+        self._energy_last_ts = last_ts
 
     def _save_persistent_data(self) -> None:
         """Persist the discovered hardware ids and a rotated cookie (SyncWorker)."""
@@ -389,15 +522,19 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             storage.save_cookie(self.hass, self.entry_id, self._raw_cookie)
             self._saved_cookie = self._raw_cookie
 
+        if round(self._energy_wh, 3) != round(self._energy_saved, 3):
+            storage.save_energy(
+                self.hass, self.entry_id, self._energy_wh, self._energy_last_ts
+            )
+            self._energy_saved = self._energy_wh
+
     def _refresh_session(self) -> bool:
         """Execute the session priming cycle."""
         if not self._client:
             return False
         try:
             headers = self._session_headers
-            response_home = self._client.get(
-                "https://www.starlink.com/account/home", headers=headers
-            )
+            response_home = self._client.get(STARLINK_PORTAL_HOME, headers=headers)
             response_auth = self._client.get(STARLINK_AUTH_URL, headers=headers)
 
             if {response_home.status_code, response_auth.status_code} & {401, 403}:
@@ -511,6 +648,10 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Service-lines fetch failed: %s", err, exc_info=True)
             return
 
+        if self._auth_lost(response) and self._refresh_bearer():
+            response = self._client.get(
+                STARLINK_WEB_SERVICE_LINES, headers=self._session_headers
+            )
         if response.status_code != 200:
             _LOGGER.debug("Service-lines fetch returned HTTP %s", response.status_code)
             return
@@ -539,7 +680,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             self.discovered_ids.add(f"Router-{router_id}")
 
         try:
-            response = self._client.get("https://www.starlink.com/account/home", headers=headers)
+            response = self._client.get(STARLINK_PORTAL_HOME, headers=headers)
             if response.status_code == 200:
                 found = set(re.findall(r"Router-[A-Fa-f0-9]{24}", response.text))
                 found.update(re.findall(r"ut[a-f0-9-]{36}", response.text))
@@ -580,21 +721,31 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return round(value, 3)
 
     def _service_line_ids(self) -> tuple[str, str] | None:
-        """Return the account reference id and service line number of this entry.
+        """Return the account reference id and first service line number.
 
-        Both come from the cached service-lines payload and are the path
-        parameters the account APIs take.
+        Used where the API is account-scoped (telemetry); the data-usage reader
+        uses :meth:`_all_service_line_ids` instead.
+        """
+        ids = self._all_service_line_ids()
+        return ids[0] if ids else None
+
+    def _all_service_line_ids(self) -> list[tuple[str, str]]:
+        """Return the account reference id and service line of every line.
+
+        An account can hold several service lines; reading only the first one
+        under-reported the total for those accounts, which is one of the
+        reasons users saw a wrong or missing figure.
         """
         if not self._service_lines:
-            return None
+            return []
         results = (self._service_lines.get("content") or {}).get("results") or []
-        if not results:
-            return None
-        account = results[0].get("accountReferenceId")
-        service_line = results[0].get("serviceLineNumber")
-        if not account or not service_line:
-            return None
-        return str(account), str(service_line)
+        ids: list[tuple[str, str]] = []
+        for result in results:
+            account = result.get("accountReferenceId")
+            service_line = result.get("serviceLineNumber")
+            if account and service_line:
+                ids.append((str(account), str(service_line)))
+        return ids
 
     @staticmethod
     def _current_billing_cycle(
@@ -609,7 +760,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 parsed.append((start, end, cycle))
         if not parsed:
             return cycles[-1] if cycles else None
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for start, end, cycle in parsed:
             if start <= now < end:
                 return cycle
@@ -618,8 +769,12 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # taking the last element would depend on the order the API happens to use.
         return max(parsed, key=lambda item: item[0])[2]
 
-    def _account_data_usage(self) -> dict[str, Any] | None:
-        """Return the data usage of the current billing cycle (SyncWorker).
+    def _usage_from_annotated(self) -> dict[str, Any] | None:
+        """Read the billing-cycle total from the annotated aggregate.
+
+        This is the source the integration has always used: one entry per
+        billing cycle for one service line, with a total, the plan buckets
+        and a per-day series.
 
         The figure the Starlink app shows under "Data usage" is an account
         value: the annotated aggregate answers with one entry per billing cycle,
@@ -627,17 +782,44 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         breakdown. Read from the account API only - the per-device gRPC polls
         cannot produce it and the service-lines payload does not hold it.
         """
-        ids = self._service_line_ids()
-        if not self._client or ids is None:
+        ids = self._all_service_line_ids()
+        if not self._client or not ids:
             return None
-        account, service_line = ids
+        readings = [
+            self._usage_for_service_line(account, service_line)
+            for account, service_line in ids
+        ]
+        readings = [reading for reading in readings if reading is not None]
+        if not readings:
+            return None
+        usage = readings[0]
+        if len(readings) > 1:
+            usage = dict(usage)
+            usage["total_gb"] = round(sum(item["total_gb"] for item in readings), 3)
+            usage["lines"] = len(readings)
+            _LOGGER.debug(
+                "Data usage: %.3f GB summed over %d service lines",
+                usage["total_gb"],
+                len(readings),
+            )
+        return usage
 
+    def _usage_for_service_line(
+        self, account: str, service_line: str
+    ) -> dict[str, Any] | None:
+        """Return the annotated usage of one service line, or None.
+
+        Raises nothing: an account with several lines keeps the lines that
+        answered instead of losing the whole figure to one failing line.
+        """
+        if not self._client:
+            return None
         try:
-            response = self._client.get(
+            response = self._request(
+                "GET",
                 STARLINK_TELEMETRYAGG_DATA_USAGE.format(
                     account=account, service_line=service_line
                 ),
-                headers=self._session_headers,
             )
         except httpx.HTTPError as err:
             _LOGGER.debug("Data usage fetch failed: %s", err, exc_info=True)
@@ -707,13 +889,155 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return {
             "total_gb": round(total, 3),
-            "source": source,
+            "source": USAGE_SOURCE_ANNOTATED,
+            "field": source,
             "limit_gb": round(limit, 3) if limit else None,
             "bucket": bucket,
             "cycle_start": cycle.get("startDate"),
             "cycle_end": cycle.get("endDate"),
             "daily_gb": daily,
+            "lines": 1,
         }
+
+    def _usage_from_telemetry(
+        self, telemetry: dict[str, dict[str, Any]] | None
+    ) -> dict[str, Any] | None:
+        """Read the account byte counters out of the telemetry snapshot.
+
+        The snapshot carries a per-account row (device type ``d``) with
+        ``DownlinkBytes``/``UplinkBytes`` and the billing day. It is the only
+        cloud figure available when the aggregate refuses an account, so it is
+        the second source in the chain.
+        """
+        if not telemetry:
+            return None
+        for record in telemetry.values():
+            downlink = _as_number(record.get("DownlinkBytes"))
+            uplink = _as_number(record.get("UplinkBytes"))
+            if downlink is None and uplink is None:
+                continue
+            total_bytes = (downlink or 0.0) + (uplink or 0.0)
+            if total_bytes <= 0:
+                continue
+            billing_day = record.get("BillingDayOfMonth")
+            _LOGGER.debug(
+                "Data usage: %.3f GB from the telemetry byte counters (billing day %s)",
+                total_bytes / 1024**3,
+                billing_day,
+            )
+            return {
+                "total_gb": round(total_bytes / 1024**3, 3),
+                "source": USAGE_SOURCE_TELEMETRY,
+                "field": "DownlinkBytes+UplinkBytes",
+                "limit_gb": None,
+                "bucket": record.get("ProductId"),
+                "cycle_start": None,
+                "cycle_end": None,
+                "daily_gb": [],
+            }
+        return None
+
+    def _usage_from_export(self) -> dict[str, Any] | None:
+        """Read consumed data blocks from the CSV export, when it has them.
+
+        The export is a per-block table. Its exact columns vary by account, so
+        the parser looks for a header that names a consumed amount in GB and
+        ignores capacity/limit columns; no such column means no figure.
+        """
+        ids = self._service_line_ids()
+        if not self._client or ids is None:
+            return None
+        account, _ = ids
+
+        try:
+            response = self._request(
+                "GET",
+                STARLINK_DATA_USAGE_EXPORT.format(account=account),
+                headers={"accept": "text/csv"},
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.debug("Data-usage export failed: %s", err, exc_info=True)
+            return None
+        if response.status_code != 200 or not response.text.strip():
+            _LOGGER.debug("Data-usage export returned HTTP %s", response.status_code)
+            return None
+
+        rows = list(csv.reader(io.StringIO(response.text)))
+        if len(rows) < 2:
+            return None
+        header = [column.strip().lower() for column in rows[0]]
+        index = None
+        # The live export names the column "TotalBlockConsumedGB": "total" here
+        # means the block total, not a cap, so only cap-like words exclude a
+        # column.
+        for position, column in enumerate(header):
+            if any(word in column for word in ("capacity", "limit", "remaining", "allowance")):
+                continue
+            if "gb" in column and any(word in column for word in ("used", "consumed", "usage")):
+                index = position
+                break
+        if index is None:
+            _LOGGER.debug("Data-usage export has no consumed-GB column: %s", header)
+            return None
+
+        total = 0.0
+        seen = False
+        for row in rows[1:]:
+            if index >= len(row):
+                continue
+            number = _as_number(row[index])
+            if number is None or number < 0:
+                continue
+            total += number
+            seen = True
+        if not seen:
+            return None
+        _LOGGER.debug("Data usage: %.3f GB from the data-block export", total)
+        return {
+            "total_gb": round(total, 3),
+            "source": USAGE_SOURCE_EXPORT,
+            "field": header[index],
+            "limit_gb": None,
+            "bucket": None,
+            "cycle_start": None,
+            "cycle_end": None,
+            "daily_gb": [],
+        }
+
+    def _account_data_usage(
+        self, telemetry: dict[str, dict[str, Any]] | None = None
+    ) -> dict[str, Any] | None:
+        """Return the data usage from the first source that answers (SyncWorker).
+
+        The annotated aggregate stays first and keeps working exactly as
+        before; the telemetry counters and the data-block export are only
+        consulted when it returns nothing usable. The source that answered is
+        remembered and tried first on the next poll, so an account does not pay
+        for two failing requests every cycle.
+        """
+        readers = [
+            (USAGE_SOURCE_ANNOTATED, self._usage_from_annotated),
+            (USAGE_SOURCE_TELEMETRY, lambda: self._usage_from_telemetry(telemetry)),
+            (USAGE_SOURCE_EXPORT, self._usage_from_export),
+        ]
+        if self._usage_source:
+            readers.sort(key=lambda item: item[0] != self._usage_source)
+
+        for name, reader in readers:
+            try:
+                usage = reader()
+            except Exception as err:  # one source must not break the poll
+                _LOGGER.debug("Data-usage source %s failed: %s", name, err, exc_info=True)
+                continue
+            if usage is None or usage.get("total_gb") is None:
+                continue
+            if name != self._usage_source:
+                _LOGGER.info("Data usage is read from the %s source", name)
+                self._usage_source = name
+            return usage
+
+        _LOGGER.debug("No data-usage source answered this poll")
+        return None
 
     def _cloud_telemetry(self) -> dict[str, dict[str, Any]]:
         """Return the account telemetry snapshot, keyed by reported device id.
@@ -729,9 +1053,9 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         account, _ = ids
 
         try:
-            response = self._client.post(
+            response = self._request(
+                "POST",
                 STARLINK_DEVICE_TELEMETRY,
-                headers=self._session_headers,
                 json={"accountNumber": account},
             )
         except httpx.HTTPError as err:
@@ -759,7 +1083,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             legend = legends.get(row[0])
             if not legend:
                 continue
-            record = dict(zip(legend, row))
+            record = dict(zip(legend, row, strict=False))
             device_id = record.get("DeviceId")
             if device_id:
                 records[str(device_id)] = record
@@ -777,7 +1101,7 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return the telemetry record belonging to a discovered target id.
 
         The two sides spell a hardware id differently (the account reports
-        ``Router-0100000000000000008B65AD`` where discovery keeps the router's
+        ``Router-<24 hex characters>`` where discovery keeps the router's
         short id), so they are compared on the normalised hex tail.
         """
         wanted = re.sub(r"[^0-9a-z]", "", target_id.lower())
@@ -788,6 +1112,70 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if found == wanted or found.endswith(wanted) or wanted.endswith(found):
                 return record
         return None
+
+    @staticmethod
+    def _power_from_history(history: Any) -> dict[str, Any] | None:
+        """Return the power series carried by a history message, if present.
+
+        Newer firmware adds a repeated float field with one sample per second
+        (900 values for the 15-minute window the app averages). The field number
+        is not in the schema this integration ships, so the array is recognised
+        by shape: an unknown length-delimited field of 600-1200 float32 values in
+        a physically plausible range. Anything ambiguous is ignored.
+        """
+        try:
+            raw = history.SerializeToString()
+        except Exception:
+            return None
+        known = {field.number for field in history.DESCRIPTOR.fields}
+
+        position = 0
+        while position < len(raw):
+            key, position = _read_varint(raw, position)
+            number, wire = key >> 3, key & 7
+            if wire == 0:
+                _, position = _read_varint(raw, position)
+                continue
+            if wire == 1:
+                position += 8
+                continue
+            if wire == 5:
+                position += 4
+                continue
+            if wire != 2:
+                return None
+            length, position = _read_varint(raw, position)
+            payload = raw[position : position + length]
+            position += length
+            if number in known or length % 4 or not POWER_SAMPLE_MIN <= length // 4 <= POWER_SAMPLE_MAX:
+                continue
+            values = struct.unpack(f"<{length // 4}f", payload)
+            if not all(0.0 <= value <= POWER_VALUE_MAX for value in values):
+                continue
+            average = sum(values) / len(values)
+            if not 1.0 <= average <= 300.0:
+                continue
+            return {
+                "average_w": round(average, 1),
+                "min_w": round(min(values), 1),
+                "max_w": round(max(values), 1),
+                "samples": len(values),
+                "window_minutes": round(len(values) / 60, 1),
+            }
+        return None
+
+    @staticmethod
+    def energy_delta_wh(average_w: float, elapsed_s: float, window_s: float) -> float:
+        """Return the energy used during ``elapsed_s`` at ``average_w``, in Wh.
+
+        The series covers at most ``window_s`` seconds; a longer gap cannot be
+        integrated from it. The elapsed part is used (never the whole window),
+        so consecutive polls never count the same second twice.
+        """
+        if average_w <= 0 or elapsed_s <= 0:
+            return 0.0
+        covered = min(elapsed_s, window_s)
+        return average_w * covered / 3600.0
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Perform the periodic update cycle."""
@@ -806,13 +1194,6 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {DATA_DEVICES: {}}
 
         data: dict[str, Any] = {DATA_DEVICES: {}}
-        headers = {
-            **self._session_headers,
-            "origin": "https://www.starlink.com",
-            "referer": "https://www.starlink.com/account/home",
-            "content-type": "application/grpc-web+proto",
-            "x-grpc-web": "1",
-        }
 
         for target_id in list(self.discovered_ids):
             device_type = "dish" if target_id.startswith("ut") else "router"
@@ -822,10 +1203,17 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "type": device_type,
             }
             try:
-                # 1. STATUS
-                response = self._client.post(
+                # 1. STATUS (POST is the gRPC-Web transport; the request kind
+                # is a read and is checked in _grpc_web_frame)
+                response = self._request(
+                    "POST",
                     STARLINK_API_URL,
-                    headers=headers,
+                    headers={
+                        "origin": "https://www.starlink.com",
+                        "referer": "https://www.starlink.com/account/home",
+                        "content-type": "application/grpc-web+proto",
+                        "x-grpc-web": "1",
+                    },
                     content=self._grpc_web_frame(
                         Request(target_id=target_id, get_status=GetStatusRequest())
                     ),
@@ -864,9 +1252,15 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 device_data[DATA_WIFI_CLIENTS] = clients
 
                 # 2. HISTORY
-                response_history = self._client.post(
+                response_history = self._request(
+                    "POST",
                     STARLINK_API_URL,
-                    headers=headers,
+                    headers={
+                        "origin": "https://www.starlink.com",
+                        "referer": "https://www.starlink.com/account/home",
+                        "content-type": "application/grpc-web+proto",
+                        "x-grpc-web": "1",
+                    },
                     content=self._grpc_web_frame(
                         Request(target_id=target_id, get_history=GetHistoryRequest())
                     ),
@@ -878,10 +1272,23 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         message_history.WhichOneof("response") if message_history else None
                     )
                     if response_type_history:
+                        history_message = getattr(message_history, response_type_history)
                         device_data["history"] = MessageToDict(
-                            getattr(message_history, response_type_history),
-                            preserving_proto_field_name=True,
+                            history_message, preserving_proto_field_name=True
                         )
+                        power = self._power_from_history(history_message)
+                        if power is not None:
+                            device_data["power"] = power
+                            now = time.time()
+                            if self._energy_last_ts:
+                                delta = self.energy_delta_wh(
+                                    power["average_w"],
+                                    now - self._energy_last_ts,
+                                    power["samples"],
+                                )
+                                self._energy_wh += delta
+                            self._energy_last_ts = now
+                            device_data["energy_kwh"] = round(self._energy_wh / 1000, 4)
 
                 data[DATA_DEVICES][target_id] = device_data
                 _LOGGER.debug("Poll succeeded for %s (%s)", target_id, device_type)
@@ -892,17 +1299,18 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # repair issue instead.
                 _LOGGER.debug("Poll failed for %s: %s", target_id, err)
 
-        # Account-wide figures, both read from the account APIs: the data usage
-        # of the current billing cycle, and the Wi-Fi client counts the routers
-        # report to the telemetry snapshot. A router whose gRPC status response
-        # delivered a real client list keeps that list.
-        usage = self._account_data_usage()
+        # Account-wide figures, both read from the account APIs: the Wi-Fi
+        # client counts the routers report to the telemetry snapshot, and the
+        # data usage of the current billing cycle. The snapshot is read first
+        # because it is also a data-usage source.
+        telemetry = self._cloud_telemetry()
+
+        usage = self._account_data_usage(telemetry)
         if usage is not None:
             self._last_usage = usage
         if self._last_usage is not None:
             data[DATA_USAGE] = self._last_usage
 
-        telemetry = self._cloud_telemetry()
         if telemetry:
             for target_id, device_data in data[DATA_DEVICES].items():
                 if device_data.get("type") != "router":
@@ -929,36 +1337,27 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return data
 
-    @staticmethod
-    def _grpc_web_frame(request: Any) -> bytes:
-        """Wrap a protobuf request in a gRPC-Web length-prefixed frame."""
-        serialized = request.SerializeToString()
-        return b"\x00" + len(serialized).to_bytes(4, "big") + serialized
-
-    @staticmethod
-    def _grpc_web_message(content: bytes, message_class: Any) -> Any | None:
-        """Parse the protobuf message out of a gRPC-Web response body."""
-        if len(content) <= 5:
-            return None
-        message_length = int.from_bytes(content[1:5], "big")
-        message = message_class()
-        message.ParseFromString(content[5 : 5 + message_length])
-        return message
-
     async def async_send_command(
         self, target_id: str, request_field: str, request_data: Any
     ) -> bool:
-        """Send a gRPC command to a specific device."""
+        """Send the one allowed command (a restart) to a device."""
         return await self.hass.async_add_executor_job(
             self._send_command, target_id, request_field, request_data
         )
 
-    def _send_command(self, target_id: str, request_field: str, request_data: Any) -> bool:
-        """Execute a gRPC command (SyncWorker)."""
-        if not self._client:
-            return False
-        from .spacex.api.device.device_pb2 import Request
+    def _send_command(
+        self, target_id: str, request_field: str, request_data: Any
+    ) -> bool:
+        """Send a restart request (SyncWorker).
 
+        Only ``reboot`` is accepted: the binding deliberately does not expose any
+        other state-changing command.
+        """
+        if self._client is None:
+            return False
+        if request_field != "reboot":
+            _LOGGER.warning("Refusing to send %s: only reboot is permitted", request_field)
+            return False
         try:
             headers = {
                 **self._session_headers,
@@ -978,6 +1377,25 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "%s sent to %s (status %s)", request_field, target_id, response.status_code
             )
             return response.status_code == 200
-        except Exception as err:  # pylint: disable=broad-except
+        except Exception as err:
             _LOGGER.error("%s failed for %s: %s", request_field, target_id, err)
             return False
+
+    @staticmethod
+    def _grpc_web_frame(request: Any) -> bytes:
+        """Wrap a read request in a gRPC-Web frame, refusing anything else."""
+        kind = request.WhichOneof("request")
+        if kind not in ALLOWED_GRPC_REQUESTS:
+            raise ValueError(f"refusing to send a non-allowed Starlink request: {kind}")
+        serialized = request.SerializeToString()
+        return b"\x00" + len(serialized).to_bytes(4, "big") + serialized
+
+    @staticmethod
+    def _grpc_web_message(content: bytes, message_class: Any) -> Any | None:
+        """Parse the protobuf message out of a gRPC-Web response body."""
+        if len(content) <= 5:
+            return None
+        message_length = int.from_bytes(content[1:5], "big")
+        message = message_class()
+        message.ParseFromString(content[5 : 5 + message_length])
+        return message
