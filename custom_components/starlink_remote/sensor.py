@@ -345,6 +345,18 @@ SENSOR_DESCRIPTIONS: tuple[StarlinkSensorEntityDescription, ...] = (
 )
 
 
+def global_host_id(devices: dict[str, dict[str, Any]]) -> str | None:
+    """Return the device the account-wide sensors hang off, deterministically.
+
+    Dishes are preferred over routers, and the lowest target id wins, so the
+    same device is picked on every start regardless of discovery order.
+    """
+    dishes = sorted(tid for tid, dev in devices.items() if dev.get("type") == "dish")
+    if dishes:
+        return dishes[0]
+    return sorted(devices)[0] if devices else None
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: Any, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -355,11 +367,12 @@ async def async_setup_entry(
     entities: list[StarlinkDeviceSensor] = []
 
     # Account-wide sensors need one host device to hang off. A dish is preferred
-    # (it is the device the account figure belongs to); otherwise the router.
-    host_id = next(
-        (tid for tid, dev in devices.items() if dev.get("type") == "dish"),
-        next(iter(devices), None),
-    )
+    # (it is the device the account figure belongs to), otherwise the router.
+    # The host must be chosen deterministically: the coordinator publishes
+    # devices in set order, which changes between restarts, and a different host
+    # would change the global sensors' unique ids - orphaning the old entities
+    # ("no longer provided by the integration") and starting their history over.
+    host_id = global_host_id(devices)
     if host_id is not None:
         for desc in SENSOR_DESCRIPTIONS:
             if "global" in desc.dev_types:
