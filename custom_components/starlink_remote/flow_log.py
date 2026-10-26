@@ -27,7 +27,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from homeassistant.util.ssl import get_default_context
 
 from . import session
 from .const import (
@@ -141,7 +140,6 @@ class CookieProbe:
                 http2=True,
                 timeout=_TIMEOUT,
                 follow_redirects=True,
-                verify=get_default_context(),
             )
         return self._client
 

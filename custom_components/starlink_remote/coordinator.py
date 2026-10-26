@@ -24,7 +24,6 @@ import httpx
 from google.protobuf.json_format import MessageToDict
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.util.ssl import get_default_context
 
 from . import notify, session, storage
 from .const import (
@@ -462,7 +461,6 @@ class StarlinkCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 http2=True,
                 timeout=15.0,
                 follow_redirects=True,
-                verify=get_default_context(),
             )
 
         self._load_persistent_data()
